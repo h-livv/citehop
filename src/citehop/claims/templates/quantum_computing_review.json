@@ -1,0 +1,34 @@
+{
+  "schema_id": "quantum_computing_review",
+  "project_domain_label": "Quantum computing literature review",
+  "claim_types": [
+    {
+      "type_id": "advantage_claim",
+      "display_name": "Advantage claim",
+      "description": "A claim that a quantum method, device, or algorithm has an advantage (asymptotic, empirical, or conjectured) over a classical counterpart.",
+      "structured_fields": [
+        {"key": "advantage_kind", "type": "enum", "enum_values": ["asymptotic", "empirical", "conjectured", "unspecified"]},
+        {"key": "problem_class", "type": "string"}
+      ]
+    },
+    {
+      "type_id": "resource_estimate",
+      "display_name": "Resource estimate",
+      "description": "A numeric estimate of computational resources required (qubits, gates, depth, shots, or runtime).",
+      "structured_fields": [
+        {"key": "resource_name", "type": "string"},
+        {"key": "amount", "type": "number"},
+        {"key": "unit", "type": "string"}
+      ]
+    },
+    {
+      "type_id": "limitation_claim",
+      "display_name": "Limitation",
+      "description": "An acknowledged limitation, caveat, or negative result about applicability or scalability.",
+      "structured_fields": [
+        {"key": "scope", "type": "string"},
+        {"key": "is_fundamental", "type": "boolean"}
+      ]
+    }
+  ]
+}

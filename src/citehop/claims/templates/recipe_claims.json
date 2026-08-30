@@ -1,0 +1,26 @@
+{
+  "schema_id": "recipe_claims",
+  "project_domain_label": "Culinary methods (toy schema for generalization tests)",
+  "claim_types": [
+    {
+      "type_id": "ingredient_substitution",
+      "display_name": "Ingredient substitution",
+      "description": "A stated substitution of one ingredient for another, including any quantity given.",
+      "structured_fields": [
+        {"key": "original", "type": "string"},
+        {"key": "replacement", "type": "string"},
+        {"key": "quantity_note", "type": "string"}
+      ]
+    },
+    {
+      "type_id": "cooking_time_estimate",
+      "display_name": "Cooking time estimate",
+      "description": "A duration or temperature instruction for a cooking step.",
+      "structured_fields": [
+        {"key": "minutes", "type": "number"},
+        {"key": "temperature_c", "type": "number"},
+        {"key": "step_name", "type": "string"}
+      ]
+    }
+  ]
+}

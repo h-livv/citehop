@@ -1,0 +1,26 @@
+{
+  "schema_id": "quantitative_claims",
+  "project_domain_label": "Quantitative scientific claims",
+  "claim_types": [
+    {
+      "type_id": "quantitative_result",
+      "display_name": "Quantitative result",
+      "description": "A measured or computed numeric result reported by the paper, including the quantity name and units when given.",
+      "structured_fields": [
+        {"key": "quantity_name", "type": "string"},
+        {"key": "value", "type": "number"},
+        {"key": "units", "type": "string"}
+      ]
+    },
+    {
+      "type_id": "comparison_claim",
+      "display_name": "Comparison",
+      "description": "A claim that one method, system, or result outperforms or differs from another, with the direction of the comparison.",
+      "structured_fields": [
+        {"key": "subject", "type": "string"},
+        {"key": "baseline", "type": "string"},
+        {"key": "direction", "type": "enum", "enum_values": ["better", "worse", "similar", "unspecified"]}
+      ]
+    }
+  ]
+}
