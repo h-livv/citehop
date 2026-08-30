@@ -29,7 +29,17 @@ It pays off when you can write a **small, closed schema up front** (advantage, r
 
 Long papers are an open risk: content past the front of the file can look like “nothing to extract” because it was never shown to the model.
 
-Desktop: `python -m citehop ui`. A longer walkthrough is in [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md).
+## Documentation
+
+| Doc | What it is |
+| --- | --- |
+| [docs/README.md](docs/README.md) | Map of the docs, what lands on disk, what this will not do |
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | How I run it (not a portable install guide) |
+| [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) | Unverified leftover paths and yield caveats |
+| [LICENSE](LICENSE) | No license is granted |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Not taking contributions |
+
+Desktop, on this machine: `python -m citehop ui`.
 
 ## Status
 

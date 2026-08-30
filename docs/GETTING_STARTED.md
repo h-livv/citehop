@@ -1,5 +1,9 @@
 # Getting started with Citehop
 
+**This walkthrough is how I run Citehop on my machine.** Defaults write under
+`/run/media/h-livv/Vault/CiteHop/`. If that path is not yours, stop and change
+config before you run anything. See the [root README](../README.md).
+
 Citehop builds a **local, resumable 1-hop citation corpus** around a seed paper
 (the paper, the papers it cites, and the papers that cite it), then extracts
 structured claims from that corpus using a schema you choose. It talks only to
