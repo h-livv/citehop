@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -59,7 +61,7 @@ class ProjectsPage(Page):
         root.addWidget(
             card(
                 wrap,
-                muted("A project binds one corpus to one claim schema. Templates are starter JSON you can edit next."),
+                muted("A project binds one corpus to one claim schema. Templates are starter JSON you can edit next. The project folder holds schema.json, extraction.db, and one JSON file per extracted claim."),
                 title="New project",
             )
         )
@@ -77,9 +79,12 @@ class ProjectsPage(Page):
         refresh.clicked.connect(self.reload)
         open_schema = QPushButton("Edit schema")
         open_schema.clicked.connect(lambda: self.show_page.emit("Schema"))
+        open_folder = QPushButton("Open folder")
+        open_folder.clicked.connect(self._open_folder)
         row = QHBoxLayout()
         row.addWidget(refresh)
         row.addWidget(open_schema)
+        row.addWidget(open_folder)
         row.addStretch()
         btns = QWidget()
         btns.setLayout(row)
@@ -199,3 +204,15 @@ class ProjectsPage(Page):
             if cell and cell.text() == project_id:
                 self.table.selectRow(r)
                 return
+
+    def _open_folder(self) -> None:
+        pid = self._project_id
+        if not pid:
+            QMessageBox.information(self, "Project", "Select a project first.")
+            return
+        try:
+            dest = self.api.get_project(pid)["project_dir"]
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Project", str(exc))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(dest)))

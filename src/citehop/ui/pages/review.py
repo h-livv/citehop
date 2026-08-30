@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from citehop.claims.api import ClaimsAPI, ProjectError, SchemaError
+from citehop.claims.files import claim_file_path
 from citehop.claims.locate import clamp_span
 from citehop.ui.pages import Page
 from citehop.ui.paper_viewer import PaperQuoteWindow
@@ -93,15 +96,19 @@ class ReviewPage(Page):
         edit = QPushButton("Edit…")
         self.go_paper = QPushButton("Go to paper")
         self.go_paper.setEnabled(False)
+        self.open_json = QPushButton("Open JSON")
+        self.open_json.setEnabled(False)
         confirm.clicked.connect(lambda: self._review("confirm"))
         reject.clicked.connect(lambda: self._review("reject"))
         edit.clicked.connect(self._edit)
         self.go_paper.clicked.connect(self._go_to_paper)
+        self.open_json.clicked.connect(self._open_json)
         actions = QHBoxLayout()
         actions.addWidget(confirm)
         actions.addWidget(reject)
         actions.addWidget(edit)
         actions.addWidget(self.go_paper)
+        actions.addWidget(self.open_json)
         actions.addStretch()
         act_w = QWidget()
         act_w.setLayout(actions)
@@ -178,6 +185,7 @@ class ReviewPage(Page):
             self.empty_lbl.setText("Select a project on the Projects tab.")
             self.empty_lbl.show()
             self.go_paper.setEnabled(False)
+            self.open_json.setEnabled(False)
             return
         try:
             self._claims = self.api.list_claims(
@@ -191,6 +199,7 @@ class ReviewPage(Page):
             self.empty_lbl.setText(str(exc))
             self.empty_lbl.show()
             self.go_paper.setEnabled(False)
+            self.open_json.setEnabled(False)
             return
         self.table.setSortingEnabled(False)
         for claim in self._claims:
@@ -211,8 +220,10 @@ class ReviewPage(Page):
             self.empty_lbl.hide()
             self.table.selectRow(0)
             self.go_paper.setEnabled(True)
+            self.open_json.setEnabled(True)
         else:
             self.go_paper.setEnabled(False)
+            self.open_json.setEnabled(False)
             agree = self.f_agree.currentData()
             if agree:
                 self.empty_lbl.setText(
@@ -242,8 +253,10 @@ class ReviewPage(Page):
             self.source.clear()
             self.detail.clear()
             self.go_paper.setEnabled(False)
+            self.open_json.setEnabled(False)
             return
         self.go_paper.setEnabled(True)
+        self.open_json.setEnabled(True)
         lines = [
             f"type: {claim.get('claim_type')}",
             f"agreement: {claim.get('agreement')}",
@@ -322,6 +335,25 @@ class ReviewPage(Page):
         self._paper_win.show()
         self._paper_win.raise_()
         self._paper_win.activateWindow()
+
+    def _open_json(self) -> None:
+        claim = self._selected_claim()
+        if not claim or not self._project_id:
+            return
+        try:
+            proj = self.api.get_project(self._project_id)
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Open JSON", str(exc))
+            return
+        path = claim_file_path(Path(proj["project_dir"]), claim["claim_id"])
+        if not path.is_file():
+            QMessageBox.information(
+                self,
+                "Open JSON",
+                f"No file yet at {path}. Run extraction, or export claims.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
 class EditClaimDialog(QDialog):

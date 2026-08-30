@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .sqliteutil import configure_connection
+
 STATUSES = ("pending", "fetched", "failed_permanent", "failed_retry")
 
 
@@ -19,10 +21,9 @@ class Manifest:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path))
+        self.conn = sqlite3.connect(str(db_path), timeout=30.0)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
+        configure_connection(self.conn, db_path)
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -236,6 +237,24 @@ class Manifest:
             "ORDER BY relation_to_seed, canonical_id"
         ).fetchall()
         return list(rows)
+
+    def count_successful_fetches(self) -> int:
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) AS n FROM papers "
+                "WHERE status='fetched' AND COALESCE(full_text_available,0)=1"
+            ).fetchone()["n"]
+        )
+
+    def requeue_unsuccessful_fetches(self) -> int:
+        """Retry papers marked fetched that never got full text (abstract-only, empty PDF)."""
+        cur = self.conn.execute(
+            "UPDATE papers SET status='failed_retry', updated_at=? "
+            "WHERE status='fetched' AND COALESCE(full_text_available,0)=0",
+            (utcnow(),),
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
 
     def all_papers(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM papers ORDER BY relation_to_seed, canonical_id"))

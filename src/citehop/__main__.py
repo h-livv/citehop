@@ -74,6 +74,17 @@ def main(argv: list[str] | None = None) -> None:
         help=f"Corpus to export (default: every corpus under {CORPORA_DIR}/).",
     )
 
+    fetch_pdfs = sub.add_parser(
+        "fetch-pdfs",
+        help="Download OA/arXiv PDFs into an existing corpus raw/ folder.",
+    )
+    fetch_pdfs.add_argument(
+        "--corpus-dir",
+        type=Path,
+        required=True,
+        help="Corpus directory that already has a manifest.db.",
+    )
+
     extract = sub.add_parser(
         "extract",
         help="Claim extraction API (the desktop UI is the primary interface).",
@@ -125,6 +136,21 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "extract":
         raise SystemExit(_extract_cmd(args) or 0)
+
+    if args.cmd == "fetch-pdfs":
+        corpus_dir = Path(args.corpus_dir).expanduser()
+        if not (corpus_dir / "manifest.db").is_file():
+            raise SystemExit(f"No manifest.db in {corpus_dir}")
+        builder = CorpusBuilder(corpus_dir, log=lambda m: print(m, flush=True))
+        try:
+            builder.fetch_full_texts()
+        except BuildPaused:
+            print("Paused. Re-run the same command to continue.")
+            raise SystemExit(0)
+        finally:
+            builder.manifest.close()
+        print(f"PDFs in {corpus_dir / 'raw'}")
+        return
 
     if args.cmd == "export":
         from .artifacts import export_readable

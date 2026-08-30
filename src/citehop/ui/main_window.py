@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from citehop import icon_path
-from citehop.catalog import summarize_corpus
+from citehop.catalog import CorpusSummary, summarize_corpus
 from citehop.config import CORPORA_DIR
 from citehop.pipeline import BuildPaused, CorpusBuilder
 from citehop.seed import PRESETS, SeedQuery
@@ -54,6 +54,7 @@ HEAD_BEFORE = {"Analyze": "CORPUS", "Models": "MODEL", "Projects": "PROJECT"}
 
 class BuildWorker(QThread):
     log = Signal(str)
+    progress = Signal(object)
     finished_ok = Signal(object)
 
     def __init__(self, payload: dict[str, Any]) -> None:
@@ -72,14 +73,22 @@ class BuildWorker(QThread):
     def run(self) -> None:
         builder: CorpusBuilder | None = None
         try:
-            builder = _make_builder(self.payload, self.log.emit, self._stop)
+            builder = _make_builder(
+                self.payload, self.log.emit, self._stop, self.progress.emit
+            )
             self._builder = builder
             if self._stop.is_set():
                 builder.pause()
             builder.run()
+            self.progress.emit(builder.snapshot_counts())
             self.finished_ok.emit({"ok": True, "corpus_dir": str(builder.corpus_dir)})
         except BuildPaused:
             path = str(builder.corpus_dir) if builder else ""
+            if builder is not None:
+                try:
+                    self.progress.emit(builder.snapshot_counts())
+                except Exception:
+                    pass
             self.finished_ok.emit({"ok": True, "paused": True, "corpus_dir": path})
         except SystemExit as exc:
             msg = exc.code if isinstance(exc.code, str) else (str(exc) or "Stopped")
@@ -121,8 +130,11 @@ def _seed_from_payload(payload: dict[str, Any]) -> SeedQuery:
 
 
 def _make_builder(
-    payload: dict[str, Any], log, stop: threading.Event
-) -> CorpusBuilder:  # noqa: ANN001
+    payload: dict[str, Any],
+    log,  # noqa: ANN001
+    stop: threading.Event,
+    progress=None,  # noqa: ANN001
+) -> CorpusBuilder:
     seed = _seed_from_payload(payload)
     if not (seed.doi or seed.arxiv_id or seed.title or seed.preset):
         raise SystemExit("Provide a PDF with identifiers, or a DOI / arXiv id / title.")
@@ -139,6 +151,7 @@ def _make_builder(
         "log": log,
         "write_readme": payload.get("mode") == "full",
         "stop": stop,
+        "progress": progress,
     }
     if payload.get("mode") != "full":
         kwargs["sample_backward"] = int(payload.get("n_backward") or 5)
@@ -159,6 +172,7 @@ class MainWindow(QMainWindow):
         self._worker: BuildWorker | None = None
         self._run_dir: Path | None = None
         self._project_id: str | None = None
+        self._poll_error_logged = False
 
         root = QWidget()
         root.setObjectName("root")
@@ -316,9 +330,11 @@ class MainWindow(QMainWindow):
         worker = BuildWorker(payload)
         self._worker = worker
         worker.log.connect(self._analyze().append_log)
+        worker.progress.connect(self._on_progress)
         worker.finished_ok.connect(self._on_done)
         worker.start()
         self.poll.start()
+        self._poll_error_logged = False
 
     def pause_analysis(self) -> None:
         if not (self._worker and self._worker.isRunning()):
@@ -360,24 +376,51 @@ class MainWindow(QMainWindow):
             return
         self.pill_run_lbl.setText("Run  complete")
         self.side_status.setText("Idle")
-        self._set_banner(f"Finished. Corpus is in {corpus_dir}", "ok")
+        self._set_banner(
+            f"Finished. Corpus is in {corpus_dir} (metadata + OA PDFs in raw/). "
+            "Next: Models → Projects → Schema → Extract.",
+            "ok",
+        )
         self.statusBar().showMessage(f"Complete  ·  {corpus_dir}")
         go = QMessageBox.question(
             self,
             "Analysis complete",
-            "Open the Corpus tab for this root paper?",
+            f"Corpus is in:\n{corpus_dir}\n\n"
+            "Open the Corpus tab, or go to Projects next to extract claims?",
         )
         if go == QMessageBox.StandardButton.Yes:
             self._show_page("Corpus")
 
+    def _on_progress(self, payload: object) -> None:
+        summary = _summary_from_progress(payload)
+        if summary is None:
+            return
+        self._apply_live_summary(summary)
+
+    def _apply_live_summary(self, summary) -> None:  # noqa: ANN001
+        self._analyze().apply_summary(summary)
+        self._corpus().apply_summary(summary)
+        if not summary:
+            return
+        ok = summary.success_count
+        self.side_status.setText(
+            f"{ok}/{summary.paper_count} processed  ·  {summary.pdf_count} PDFs"
+        )
+        self.pill_run_lbl.setText(f"Run  {ok} processed")
+
     def _poll_run(self) -> None:
         path = self._run_dir
         if path is None and self._worker and self._worker.isRunning():
-            # Worker has not returned the path yet; try default from latest log is skipped.
             return
         if path and path.is_dir():
-            summary = summarize_corpus(path)
-            self._analyze().apply_summary(summary)
+            try:
+                summary = summarize_corpus(path)
+            except Exception as exc:  # noqa: BLE001
+                if not self._poll_error_logged:
+                    self._analyze().append_log(f"Could not refresh counts from disk: {exc}")
+                    self._poll_error_logged = True
+                return
+            self._apply_live_summary(summary)
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
         extract = self.page_by_name.get("Extract")
@@ -387,6 +430,29 @@ class MainWindow(QMainWindow):
             self.pause_analysis()
             self._worker.wait(8000)
         super().closeEvent(event)
+
+
+def _summary_from_progress(payload: object) -> CorpusSummary | None:
+    if not isinstance(payload, dict):
+        return None
+    path = Path(payload.get("path") or ".")
+    return CorpusSummary(
+        slug=str(payload.get("slug") or path.name),
+        path=path,
+        seed_title=str(payload.get("slug") or path.name),
+        seed_id=None,
+        seed_doi=None,
+        seed_arxiv=None,
+        year=None,
+        paper_count=int(payload.get("paper_count") or 0),
+        relation_counts=dict(payload.get("relation_counts") or {}),
+        status_counts=dict(payload.get("status_counts") or {}),
+        run_mode=payload.get("run_mode"),
+        started_at=None,
+        finished_at=None,
+        pdf_count=int(payload.get("pdf_count") or 0),
+        success_count=int(payload.get("success_count") or 0),
+    )
 
 
 def run_app() -> int:

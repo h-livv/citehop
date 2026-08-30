@@ -98,7 +98,7 @@ class ExtractPage(Page):
         root.addWidget(
             card(
                 btn_w,
-                muted("Dual-pass extraction against this project's schema. Pause aborts the in-flight FreeToken/Ollama request; the current paper is retried on resume. Weights stay in VRAM until you Unload from VRAM on the Models tab."),
+                muted("Dual-pass extraction against this project's schema. Pause aborts the in-flight FreeToken/Ollama request; the current paper is retried on resume. Each claim is written as JSON under the project claims/ folder as papers finish. Weights stay in VRAM until you Unload from VRAM on the Models tab."),
                 title="Run",
             )
         )
@@ -184,8 +184,9 @@ class ExtractPage(Page):
         budget = int(status.get("token_budget") or 0)
         st = status.get("status") or "idle"
         self.kpi_papers.set_value(f"{done + skipped} / {total}", "processed / total")
+        n_claims = int(status.get("claims_count") or status.get("claim_count") or 0)
         self.kpi_tokens.set_value(f"{used:,} / {budget:,}", "used / budget")
-        self.kpi_status.set_value(st)
+        self.kpi_status.set_value(st, f"{n_claims} claims")
         self.kpi_eta.set_value(_eta(status))
         running = bool(self._worker and self._worker.isRunning())
         self.start_btn.setEnabled(
@@ -266,6 +267,13 @@ class ExtractPage(Page):
             self.log.appendPlainText(
                 f"{status.get('status')}  papers {done}/{total}  tokens {status.get('tokens_used')}"
             )
+            if status.get("status") == "completed":
+                claims_dir = status.get("claims_dir")
+                n = status.get("claim_count") or status.get("claims_count")
+                if claims_dir:
+                    self.log.appendPlainText(
+                        f"Claims JSON: {n} files in {claims_dir}"
+                    )
 
     @Slot(str)
     def _on_fail(self, message: str) -> None:

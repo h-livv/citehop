@@ -1114,6 +1114,38 @@ class HardeningTests(unittest.TestCase):
         only = json.loads(Path(filtered["path"]).read_text(encoding="utf-8"))
         self.assertEqual(len(only["claims"]), 1)
 
+    def test_each_claim_is_a_json_file_in_the_project_dir(self) -> None:
+        import json
+
+        from citehop.claims.files import claim_file_path, claims_dir
+
+        corpus = _write_corpus(self.root / "c-files", "p-files", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Files", corpus, template_id="recipe_claims")
+        pid = proj["project_id"]
+        _run_until_idle(self.api, pid)
+        claims = self.api.list_claims(pid)
+        self.assertTrue(claims)
+        folder = claims_dir(Path(proj["project_dir"]))
+        self.assertTrue((folder / "index.json").is_file())
+        for claim in claims:
+            path = claim_file_path(Path(proj["project_dir"]), claim["claim_id"])
+            self.assertTrue(path.is_file(), path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["format"], "citehop.claim.v1")
+            self.assertEqual(payload["claim_id"], claim["claim_id"])
+            self.assertEqual(payload["claim_text"], claim["claim_text"])
+            self.assertEqual(payload["paper_canonical_id"], claim["paper_canonical_id"])
+        reviewed = self.api.review_claim(pid, claims[0]["claim_id"], "confirm")
+        updated = json.loads(
+            claim_file_path(Path(proj["project_dir"]), claims[0]["claim_id"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(reviewed["verification_status"], "human_confirmed")
+        self.assertEqual(updated["verification_status"], "human_confirmed")
+        status = self.api.run_status(pid)
+        self.assertGreaterEqual(int(status.get("claims_count") or 0), len(claims))
+
 
 if __name__ == "__main__":
     unittest.main()

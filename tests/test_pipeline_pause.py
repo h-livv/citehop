@@ -7,10 +7,13 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from citehop.http_client import FetchCancelled, RateLimitedClient
 from citehop.ids import file_id
 from citehop.pipeline import BuildPaused, CorpusBuilder
+from citehop.seed import SeedQuery
 
 
 def _pending_paper(canonical_id: str, relation: str = "backward_reference") -> dict:
@@ -131,6 +134,158 @@ class PipelinePauseTests(unittest.TestCase):
         self.assertEqual(rec["old_canonical_id"], "old-id")
         self.assertEqual(rec["new_canonical_id"], "new-id")
         self.assertEqual(rec["action"], "skipped_dest_exists")
+        builder.manifest.close()
+
+    def test_store_pdf_and_missing_pdf_backfill(self) -> None:
+        builder = self._builder()
+        cid = "arxiv:1234.56789"
+        rec = _pending_paper(cid)
+        rec["arxiv_id"] = "1234.56789"
+        rec["status"] = "fetched"
+        rec["full_text_available"] = 1
+        builder.manifest.upsert_paper(rec)
+        fake = b"%PDF-1.4\n%fake-pdf\n"
+        builder._fetch_arxiv_pdf_bytes = lambda _row: fake  # type: ignore[method-assign]
+        builder.fetch_missing_pdfs()
+        self.assertTrue(builder._pdf_path(cid).is_file())
+        self.assertEqual(builder.snapshot_counts()["pdf_count"], 1)
+        builder.manifest.close()
+
+    def test_progress_callback_sees_fetched_count(self) -> None:
+        seen: list[dict] = []
+        builder = CorpusBuilder(
+            self.root / "corpus-progress",
+            log=lambda _m: None,
+            progress=seen.append,
+        )
+        builder.manifest.upsert_paper(_pending_paper("paper-a"))
+        builder.manifest.set_status("paper-a", "fetched", full_text_available=1)
+        builder._emit_progress()
+        self.assertTrue(seen)
+        self.assertEqual(seen[-1]["status_counts"].get("fetched"), 1)
+        self.assertEqual(seen[-1]["paper_count"], 1)
+        self.assertEqual(seen[-1]["success_count"], 1)
+        builder.manifest.close()
+
+    def test_unsuccessful_fetch_is_retried_not_counted_as_processed(self) -> None:
+        builder = self._builder()
+        builder.manifest.upsert_paper(_pending_paper("paper-miss"))
+        builder._finish_no_fulltext("paper-miss", {}, "no_open_access_version")
+        row = builder.manifest.get_paper("paper-miss")
+        assert row is not None
+        self.assertEqual(row["status"], "failed_retry")
+        self.assertEqual(builder.manifest.count_successful_fetches(), 0)
+        waiting = [r["canonical_id"] for r in builder.manifest.papers_needing_fetch()]
+        self.assertIn("paper-miss", waiting)
+        self.assertEqual(builder.snapshot_counts()["success_count"], 0)
+        builder.manifest.close()
+
+    def test_requeue_unsuccessful_leaves_true_fetches_alone(self) -> None:
+        builder = self._builder()
+        miss = _pending_paper("paper-abs")
+        miss["status"] = "fetched"
+        miss["full_text_available"] = 0
+        builder.manifest.upsert_paper(miss)
+        ok = _pending_paper("paper-ok")
+        ok["status"] = "fetched"
+        ok["full_text_available"] = 1
+        builder.manifest.upsert_paper(ok)
+        n = builder.manifest.requeue_unsuccessful_fetches()
+        self.assertEqual(n, 1)
+        self.assertEqual(builder.manifest.get_paper("paper-abs")["status"], "failed_retry")
+        self.assertEqual(builder.manifest.get_paper("paper-ok")["status"], "fetched")
+        self.assertEqual(builder.manifest.count_successful_fetches(), 1)
+        builder.manifest.close()
+
+    def test_fetch_one_saves_arxiv_pdf_for_new_pending_paper(self) -> None:
+        builder = self._builder()
+        cid = "arxiv:1234.56789"
+        rec = _pending_paper(cid)
+        rec["arxiv_id"] = "1234.56789"
+        builder.manifest.upsert_paper(rec)
+        row = builder.manifest.get_paper(cid)
+        assert row is not None
+        latex = "body " * 80
+        fake_pdf = b"%PDF-1.4\n%fake-pdf-bytes\n"
+
+        def fake_eprint(*_a, **_k):
+            return b"%latex", "application/x-eprint"
+
+        with (
+            patch("citehop.pipeline.arxiv_api.fetch_eprint", side_effect=fake_eprint),
+            patch(
+                "citehop.pipeline.extract_eprint_text",
+                return_value=("arxiv_latex", latex, None),
+            ),
+        ):
+            builder._fetch_arxiv_pdf_bytes = lambda _row: fake_pdf  # type: ignore[method-assign]
+            builder._fetch_one(row)
+        dest = builder._pdf_path(cid)
+        self.assertTrue(dest.is_file(), "Analyze/CLI fetch must write raw/<id>.pdf")
+        self.assertEqual(dest.read_bytes(), fake_pdf)
+        fetched = builder.manifest.get_paper(cid)
+        assert fetched is not None
+        self.assertEqual(fetched["status"], "fetched")
+        self.assertEqual(fetched["full_text_available"], 1)
+        self.assertEqual(builder.snapshot_counts()["pdf_count"], 1)
+        builder.manifest.close()
+
+    def test_fetch_one_saves_oa_pdf_for_new_pending_paper(self) -> None:
+        builder = self._builder()
+        cid = "doi:10.1234/new-paper"
+        rec = _pending_paper(cid)
+        rec["doi"] = "10.1234/new-paper"
+        rec["metadata"] = {"s2_open_access_pdf_url": "https://example.org/oa.pdf"}
+        builder.manifest.upsert_paper(rec)
+        row = builder.manifest.get_paper(cid)
+        assert row is not None
+        fake_pdf = b"%PDF-1.4\n%oa-pdf-bytes\n"
+        with (
+            patch("citehop.pipeline.extract_pdf_text", return_value="claim " * 80),
+            patch.object(
+                builder.http,
+                "download",
+                return_value=SimpleNamespace(content=fake_pdf),
+            ),
+        ):
+            builder._fetch_one(row)
+        self.assertTrue(builder._pdf_path(cid).is_file())
+        self.assertEqual(builder._pdf_path(cid).read_bytes(), fake_pdf)
+        fetched = builder.manifest.get_paper(cid)
+        assert fetched is not None
+        self.assertEqual(fetched["status"], "fetched")
+        builder.manifest.close()
+
+    def test_copy_seed_pdf_into_raw_for_new_seed(self) -> None:
+        seed_pdf = self.root / "uploaded.pdf"
+        seed_pdf.write_bytes(b"%PDF-1.4\n%uploaded-seed\n")
+        builder = CorpusBuilder(
+            self.root / "corpus-seed",
+            seed=SeedQuery(pdf=seed_pdf),
+            log=lambda _m: None,
+        )
+        cid = "arxiv:seed.00001"
+        rec = _pending_paper(cid)
+        rec["relation_to_seed"] = "seed"
+        builder.manifest.upsert_paper(rec)
+        self.assertTrue(builder._copy_seed_pdf(cid))
+        self.assertEqual(
+            builder._pdf_path(cid).read_bytes(),
+            b"%PDF-1.4\n%uploaded-seed\n",
+        )
+        builder.manifest.close()
+
+    def test_missing_pdf_backfill_skips_pending_new_papers(self) -> None:
+        builder = self._builder()
+        rec = _pending_paper("arxiv:pend.00001")
+        rec["arxiv_id"] = "pend.00001"
+        builder.manifest.upsert_paper(rec)
+        called: list[str] = []
+        builder._save_pdf_for_row = (  # type: ignore[method-assign]
+            lambda row: called.append(row["canonical_id"]) or False
+        )
+        builder.fetch_missing_pdfs()
+        self.assertEqual(called, [])
         builder.manifest.close()
 
 

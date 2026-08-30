@@ -32,6 +32,8 @@ class CorpusSummary:
     run_mode: str | None
     started_at: str | None
     finished_at: str | None
+    pdf_count: int = 0
+    success_count: int = 0
 
     @property
     def label(self) -> str:
@@ -61,6 +63,10 @@ def summarize_corpus(corpus_dir: Path) -> CorpusSummary | None:
         seed = _seed_row(manifest)
         title = (seed["title"] if seed else None) or corpus_dir.name
         year = int(seed["year"]) if seed and seed["year"] else None
+        raw = Path(corpus_dir) / "raw"
+        pdf_count = 0
+        if raw.is_dir():
+            pdf_count = sum(1 for p in raw.iterdir() if p.suffix.lower() == ".pdf")
         return CorpusSummary(
             slug=corpus_dir.name,
             path=Path(corpus_dir),
@@ -76,6 +82,8 @@ def summarize_corpus(corpus_dir: Path) -> CorpusSummary | None:
             run_mode=manifest.get_meta("run_mode"),
             started_at=manifest.get_meta("run_started_at"),
             finished_at=manifest.get_meta("run_finished_at"),
+            pdf_count=pdf_count,
+            success_count=manifest.count_successful_fetches(),
         )
     finally:
         manifest.close()

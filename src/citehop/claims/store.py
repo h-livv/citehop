@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from citehop.sqliteutil import configure_connection
 from citehop.store import utcnow
 
 RUN_STATUSES = ("idle", "running", "paused", "completed", "failed")
@@ -45,9 +46,7 @@ class ClaimStore:
         # Autocommit: multi-statement work uses explicit BEGIN IMMEDIATE.
         self.conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA busy_timeout=30000")
+        configure_connection(self.conn, self.db_path)
         self._init()
 
     def _init(self) -> None:
@@ -422,6 +421,7 @@ class ClaimStore:
         except Exception:
             self._rollback()
             raise
+        self._persist_claim_files(records)
 
     def complete_paper(
         self,
@@ -455,6 +455,13 @@ class ClaimStore:
         except Exception:
             self._rollback()
             raise
+        if claims:
+            self._persist_claim_files(claims)
+
+    def _persist_claim_files(self, records: list[dict[str, Any]]) -> None:
+        from .files import write_claim_files
+
+        write_claim_files(self.db_path.parent, records)
 
     def _insert_claims_uncommitted(self, records: list[dict[str, Any]]) -> None:
         now = utcnow()
@@ -595,6 +602,7 @@ class ClaimStore:
             raise
         updated = self.get_claim(claim_id)
         assert updated is not None
+        self._persist_claim_files([updated])
         return updated
 
     def run_status_dict(self, run_id: str) -> dict[str, Any] | None:
@@ -629,6 +637,9 @@ class ClaimStore:
             "llm_backend": row["llm_backend"] if "llm_backend" in row.keys() else None,
             "llm_model": row["llm_model"] if "llm_model" in row.keys() else None,
             "schema_id": row["schema_id"] if "schema_id" in row.keys() else None,
+            "claims_count": self.conn.execute(
+                "SELECT COUNT(*) AS n FROM claims WHERE run_id=?", (run_id,)
+            ).fetchone()["n"],
         }
 
 

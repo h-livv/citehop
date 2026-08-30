@@ -56,6 +56,27 @@ def _prefer_authors(old: list[str] | None, new: list[str] | None) -> list[str] |
     return new
 
 
+def _oa_pdf_urls(row) -> list[str]:
+    extras = {}
+    raw = row["metadata_json"] if "metadata_json" in row.keys() else None
+    if raw:
+        try:
+            extras = json.loads(raw) or {}
+        except json.JSONDecodeError:
+            extras = {}
+    urls = []
+    for key in (
+        "s2_open_access_pdf_url",
+        "openalex_pdf_url",
+        "openalex_oa_url",
+        "unpaywall_pdf_url",
+    ):
+        url = extras.get(key)
+        if url and str(url).startswith("http"):
+            urls.append(str(url))
+    return urls
+
+
 class BuildPaused(Exception):
     """User paused or closed the app. Manifest on disk is consistent; resume the same seed."""
 
@@ -71,6 +92,7 @@ class CorpusBuilder:
         write_readme: bool = False,
         log: Callable[[str], None] | None = None,
         stop: threading.Event | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.seed = seed.normalized() if seed else None
         self.corpus_dir = Path(corpus_dir)
@@ -79,6 +101,8 @@ class CorpusBuilder:
         self.write_readme = write_readme
         self.sample_mode = sample_backward is not None or sample_forward is not None
         self._log = log or (lambda msg: print(msg, flush=True))
+        self._progress = progress
+        self._progress_n = 0
         self._stop = stop if stop is not None else threading.Event()
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         for sub in ("raw", "text", "metadata"):
@@ -97,6 +121,36 @@ class CorpusBuilder:
     def _check_pause(self) -> None:
         if self._stop.is_set():
             raise BuildPaused("Corpus analysis paused")
+
+    def snapshot_counts(self) -> dict[str, Any]:
+        rel = self.manifest.counts_by_relation()
+        st = self.manifest.counts_by_status()
+        raw = self.corpus_dir / "raw"
+        pdfs = 0
+        if raw.is_dir():
+            pdfs = sum(1 for p in raw.iterdir() if p.suffix.lower() == ".pdf")
+        return {
+            "slug": self.corpus_dir.name,
+            "path": str(self.corpus_dir),
+            "paper_count": sum(rel.values()),
+            "relation_counts": rel,
+            "status_counts": st,
+            "pdf_count": pdfs,
+            "success_count": self.manifest.count_successful_fetches(),
+            "run_mode": self.manifest.get_meta("run_mode"),
+        }
+
+    def _emit_progress(self, *, every: int = 1) -> None:
+        self._progress_n += 1
+        if every > 1 and self._progress_n % every != 0:
+            return
+        if self._progress_n % 5 == 0:
+            artifacts.write_run_state(self.corpus_dir, self.manifest)
+        if self._progress:
+            try:
+                self._progress(self.snapshot_counts())
+            except Exception:
+                pass
 
     def run(self) -> None:
         try:
@@ -144,7 +198,7 @@ class CorpusBuilder:
         self._log("Enriching OpenAlex identifiers…")
         self.enrich_openalex_ids()
         self._check_pause()
-        self._log("Fetching full texts where an OA copy exists…")
+        self._log("Fetching full texts and OA PDFs (saved under raw/)…")
         self.fetch_full_texts()
         self.manifest.set_meta("run_finished_at", utcnow())
         artifacts.write_citation_graph(self.corpus_dir, self.manifest)
@@ -174,6 +228,7 @@ class CorpusBuilder:
             )
         if job and job["status"] == "complete" and cid and s2_id:
             self._log(f"Seed already resolved: {cid}")
+            self._copy_seed_pdf(cid)
             return cid
         if not self.seed:
             raise SystemExit(
@@ -250,6 +305,7 @@ class CorpusBuilder:
             s2_id=rec["semantic_scholar_id"],
             openalex_id=rec["openalex_id"],
         )
+        self._copy_seed_pdf(cid)
         self._log(
             f"Seed confirmed: {cid}\n"
             f"  title={rec['title']}\n"
@@ -505,6 +561,7 @@ class CorpusBuilder:
         row = self.manifest.get_paper(cid)
         if row:
             artifacts.write_paper_metadata(self.corpus_dir, row)
+        self._emit_progress(every=10)
         return cid
 
     def _migrate_canonical(self, old: str, new: str) -> None:
@@ -551,8 +608,12 @@ class CorpusBuilder:
                     src.replace(dst)
 
     def fetch_full_texts(self) -> None:
+        n_retry = self.manifest.requeue_unsuccessful_fetches()
+        if n_retry:
+            self._log(f"Requeued {n_retry} unsuccessful papers for another fetch")
         pending = self.manifest.papers_needing_fetch()
         self._log(f"Full-text queue: {len(pending)} papers")
+        self._emit_progress()
         for row in pending:
             self._check_pause()
             self._log(f"  fetching {row['canonical_id']!s:.80} [{row['relation_to_seed']}]")
@@ -577,6 +638,106 @@ class CorpusBuilder:
                 artifacts.write_paper_metadata(
                     self.corpus_dir, self.manifest.get_paper(row["canonical_id"])
                 )
+            self._emit_progress()
+        self.fetch_missing_pdfs()
+
+    def fetch_missing_pdfs(self) -> None:
+        """Download OA/arXiv PDFs still missing after a paper has been processed."""
+        missing = []
+        for row in self.manifest.all_papers():
+            dest = self.corpus_dir / "raw" / f"{row['file_id']}.pdf"
+            if dest.is_file() or row["status"] == "pending":
+                continue
+            if row["arxiv_id"] or _oa_pdf_urls(row):
+                missing.append(row)
+        if not missing:
+            return
+        self._log(f"PDF backfill queue: {len(missing)} papers without a local PDF")
+        saved = 0
+        for row in missing:
+            self._check_pause()
+            if self._save_pdf_for_row(row) or (
+                row["relation_to_seed"] == "seed" and self._copy_seed_pdf(row["canonical_id"])
+            ):
+                saved += 1
+                self._log(f"  saved PDF {row['canonical_id']!s:.80}")
+            self._emit_progress()
+        self._log(f"PDF backfill saved {saved} files under {self.corpus_dir / 'raw'}")
+
+    def _pdf_path(self, cid: str) -> Path:
+        return self.corpus_dir / "raw" / f"{file_id(cid)}.pdf"
+
+    def _copy_seed_pdf(self, cid: str) -> bool:
+        path = self.seed.pdf if self.seed else None
+        if not path or not Path(path).is_file():
+            return False
+        if self._pdf_path(cid).is_file():
+            return True
+        if self._store_pdf(cid, Path(path).read_bytes()):
+            self._log(f"  seed PDF saved as {self._pdf_path(cid).name}")
+            return True
+        return False
+
+    def _keep_pdf(self, row, pdf_bytes: bytes | None, extras: dict) -> None:
+        """Write a PDF into raw/ whenever Analyze (or CLI) has bytes or an OA URL."""
+        cid = row["canonical_id"]
+        if self._pdf_path(cid).is_file():
+            extras["pdf_saved"] = True
+            return
+        if self._store_pdf(cid, pdf_bytes):
+            extras["pdf_saved"] = True
+            self._log(f"  PDF saved {self._pdf_path(cid).name}")
+            return
+        if self._save_pdf_for_row(row):
+            extras["pdf_saved"] = True
+            self._log(f"  PDF saved {self._pdf_path(cid).name}")
+            return
+        if self._copy_seed_pdf(cid):
+            extras["pdf_saved"] = True
+
+    def _store_pdf(self, cid: str, pdf_bytes: bytes | None) -> bool:
+        if not pdf_bytes or not is_pdf_bytes(pdf_bytes) or is_html_bytes(pdf_bytes):
+            return False
+        if len(pdf_bytes) > MAX_PDF_BYTES:
+            return False
+        artifacts.atomic_write_bytes(self._pdf_path(cid), pdf_bytes)
+        return True
+
+    def _fetch_arxiv_pdf_bytes(self, row) -> bytes | None:
+        if not row["arxiv_id"]:
+            return None
+        try:
+            data = arxiv_api.fetch_pdf(self.http, row["arxiv_id"], paper_id=row["canonical_id"])
+        except (BuildPaused, FetchCancelled):
+            raise
+        except PermanentHttpError:
+            return None
+        except Exception:
+            return None
+        if is_pdf_bytes(data) and not is_html_bytes(data) and len(data) <= MAX_PDF_BYTES:
+            return data
+        return None
+
+    def _save_pdf_for_row(self, row) -> bool:
+        cid = row["canonical_id"]
+        dest = self._pdf_path(cid)
+        if dest.is_file():
+            return False
+        pdf_bytes = self._fetch_arxiv_pdf_bytes(row)
+        if pdf_bytes and self._store_pdf(cid, pdf_bytes):
+            return True
+        for url in _oa_pdf_urls(row):
+            try:
+                resp = self.http.download(url, paper_id=cid, action="oa_pdf")
+            except (BuildPaused, FetchCancelled):
+                raise
+            except PermanentHttpError:
+                continue
+            except Exception:
+                continue
+            if self._store_pdf(cid, resp.content):
+                return True
+        return False
 
     def _fetch_one(self, row) -> None:
         cid = row["canonical_id"]
@@ -617,6 +778,12 @@ class CorpusBuilder:
             except Exception as exc:
                 extras["arxiv_error"] = str(exc)[:300]
 
+        if method == "arxiv_latex" and pdf_bytes is None:
+            extra_pdf = self._fetch_arxiv_pdf_bytes(row)
+            if extra_pdf:
+                pdf_bytes = extra_pdf
+                extras["arxiv_pdf_saved"] = True
+
         if method is None:
             oa_candidates = [
                 extras.get("s2_open_access_pdf_url"),
@@ -628,6 +795,7 @@ class CorpusBuilder:
                 if upw:
                     extras["unpaywall_is_oa"] = upw.get("is_oa")
                     extras["unpaywall_oa_status"] = upw.get("oa_status")
+                    extras["unpaywall_pdf_url"] = upw.get("pdf_url")
                     oa_candidates.append(upw.get("pdf_url"))
             for url in oa_candidates:
                 if not url or not str(url).startswith("http"):
@@ -639,6 +807,7 @@ class CorpusBuilder:
                 except PermanentHttpError as exc:
                     extras["oa_error"] = f"{url} -> {exc.status_code}"
                     if exc.status_code in (401, 403):
+                        self._keep_pdf(row, pdf_bytes, extras)
                         return self._finish_no_fulltext(cid, extras, "paywalled")
                     continue
                 body = resp.content
@@ -666,11 +835,27 @@ class CorpusBuilder:
                 text = extract_pdf_text(pdf_bytes)
                 extras["local_seed_pdf_used"] = True
 
+        self._keep_pdf(row, pdf_bytes, extras)
+
+        if (
+            method is None
+            and self._pdf_path(cid).is_file()
+            and (not text or len(text.strip()) <= 200)
+        ):
+            try:
+                extracted = extract_pdf_text(self._pdf_path(cid).read_bytes())
+            except Exception as exc:
+                extras["pdf_extract_error"] = str(exc)[:300]
+            else:
+                if extracted and len(extracted.strip()) > 200:
+                    method = "oa_pdf"
+                    text = extracted
+                    extras["text_from_saved_pdf"] = True
+                    if not source_url:
+                        source_url = str(self._pdf_path(cid))
+
         if method in ("arxiv_latex", "arxiv_pdf", "oa_pdf") and text and len(text.strip()) > 200:
-            fid = file_id(cid)
-            if pdf_bytes and method in ("arxiv_pdf", "oa_pdf"):
-                artifacts.atomic_write_bytes(self.corpus_dir / "raw" / f"{fid}.pdf", pdf_bytes)
-            artifacts.atomic_write_text(self.corpus_dir / "text" / f"{fid}.txt", text)
+            artifacts.atomic_write_text(self.corpus_dir / "text" / f"{file_id(cid)}.txt", text)
             self.manifest.set_status(
                 cid,
                 "fetched",
@@ -717,12 +902,12 @@ class CorpusBuilder:
             )
         self.manifest.set_status(
             cid,
-            "fetched",
+            "failed_retry",
             full_text_available=0,
             fetch_method=method,
             source_url=url,
             fetch_timestamp=utcnow(),
-            fetch_status=fetch_status,
+            fetch_status="failed",
             failure_reason=reason,
             metadata_json=json.dumps(extras, ensure_ascii=False),
         )
@@ -730,7 +915,7 @@ class CorpusBuilder:
         self.http.log(
             paper_id=cid,
             action="full_text",
-            outcome="no_full_text",
+            outcome="failed_retry",
             failure_reason=reason,
             fetch_method=method,
         )

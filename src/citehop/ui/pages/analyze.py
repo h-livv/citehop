@@ -306,4 +306,8 @@ class AnalyzePage(Page):
         self.kpi_back.set_value(str(rel.get("backward_reference", 0)), "references")
         self.kpi_fwd.set_value(str(rel.get("forward_citation", 0)), "citations")
         fetched = st.get("fetched", 0)
-        self.kpi_text.set_value(str(fetched), "fetched")
+        pdfs = getattr(summary, "pdf_count", 0) or 0
+        successful = getattr(summary, "success_count", None)
+        if successful is None:
+            successful = fetched
+        self.kpi_text.set_value(str(successful), f"{pdfs} PDFs")

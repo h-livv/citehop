@@ -259,6 +259,7 @@ class ClaimsAPI:
         project = self.projects.get_project(project_id)
         schema = require_schema_for_run(self.projects, project_id)
         store = self._store(project_id)
+        just_completed = False
         try:
             run = store.latest_run(project_id)
             if not run:
@@ -305,6 +306,7 @@ class ClaimsAPI:
                             # Another worker holds in-flight papers; do not mark complete.
                             break
                         store.set_run_status(run_id, "completed")
+                        just_completed = True
                         break
                     try:
                         result = process_one_paper(
@@ -337,9 +339,20 @@ class ClaimsAPI:
                 watch_stop.set()
             status = store.run_status_dict(run_id)
             assert status is not None
-            return status
         finally:
             store.close()
+        if just_completed and status is not None:
+            try:
+                exported = self.export_claims(project_id)
+                status = {
+                    **status,
+                    "export_path": exported["path"],
+                    "claim_count": exported["claim_count"],
+                    "claims_dir": str(self.projects.project_dir(project_id) / "claims"),
+                }
+            except ExtractionError:
+                pass
+        return status
 
     def list_claims(
         self,
@@ -518,7 +531,15 @@ class ClaimsAPI:
         tmp = dest.with_suffix(dest.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp.replace(dest)
-        return {"path": str(dest), "claim_count": len(claims), "run_id": rid}
+        from .files import write_claim_files
+
+        write_claim_files(self.projects.project_dir(project_id), claims)
+        return {
+            "path": str(dest),
+            "claims_dir": str(self.projects.project_dir(project_id) / "claims"),
+            "claim_count": len(claims),
+            "run_id": rid,
+        }
 
     def _run_identity(self, project_id: str) -> dict[str, str | None]:
         schema = self.get_schema(project_id)

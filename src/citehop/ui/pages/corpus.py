@@ -170,6 +170,15 @@ class CorpusPage(Page):
         self._set_summary(summarize_corpus(path))
         self._fill_table(load_papers(path))
 
+    def apply_summary(self, summary: CorpusSummary | None) -> None:
+        self._set_summary(summary)
+
+    def on_show(self) -> None:
+        if self._current_path:
+            from citehop.catalog import summarize_corpus
+
+            self.apply_summary(summarize_corpus(self._current_path))
+
     def _set_summary(self, summary: CorpusSummary | None) -> None:
         if not summary:
             for kpi in (self.kpi_papers, self.kpi_back, self.kpi_fwd, self.kpi_text):
@@ -179,8 +188,8 @@ class CorpusPage(Page):
         self.kpi_papers.set_value(str(summary.paper_count), summary.slug)
         self.kpi_back.set_value(str(rel.get("backward_reference", 0)), "references")
         self.kpi_fwd.set_value(str(rel.get("forward_citation", 0)), "citations")
-        fetched = summary.status_counts.get("fetched", 0)
-        self.kpi_text.set_value(str(fetched), "fetched")
+        successful = summary.success_count
+        self.kpi_text.set_value(str(successful), f"{summary.pdf_count} PDFs")
 
     def _fill_table(self, papers: list[dict]) -> None:
         self._papers = papers
