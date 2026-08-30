@@ -111,6 +111,13 @@ class ClaimStore:
             CREATE INDEX IF NOT EXISTS idx_run_papers_status ON run_papers(run_id, status);
             """
         )
+        self._migrate_run_identity()
+
+    def _migrate_run_identity(self) -> None:
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        for name in ("llm_backend", "llm_model", "schema_id"):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -142,6 +149,10 @@ class ClaimStore:
         papers: list[dict[str, str]],
         token_budget: int,
         time_budget_seconds: int | None = None,
+        *,
+        llm_backend: str | None = None,
+        llm_model: str | None = None,
+        schema_id: str | None = None,
     ) -> str:
         run_id = uuid.uuid4().hex
         now = utcnow()
@@ -149,8 +160,9 @@ class ClaimStore:
         try:
             self.conn.execute(
                 "INSERT INTO runs(run_id, project_id, status, token_budget, tokens_used, "
-                "time_budget_seconds, started_at, updated_at, papers_total, pause_requested) "
-                "VALUES(?,?,?,?,?,?,?,?,?,0)",
+                "time_budget_seconds, started_at, updated_at, papers_total, pause_requested, "
+                "llm_backend, llm_model, schema_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?)",
                 (
                     run_id,
                     project_id,
@@ -161,6 +173,9 @@ class ClaimStore:
                     now,
                     now,
                     len(papers),
+                    llm_backend,
+                    llm_model,
+                    schema_id,
                 ),
             )
             for paper in papers:
@@ -297,6 +312,52 @@ class ClaimStore:
                 n += int(cur.rowcount or 0)
         return n
 
+    def requeue_retryable_errors(self, run_id: str) -> int:
+        """Pending-again papers that failed because the engine was not ready."""
+        from citehop.claims.llm import retryable_backend_message
+
+        rows = self.conn.execute(
+            "SELECT paper_canonical_id, error FROM run_papers "
+            "WHERE run_id=? AND status='error'",
+            (run_id,),
+        ).fetchall()
+        n = 0
+        now = utcnow()
+        for row in rows:
+            if not retryable_backend_message(row["error"] or ""):
+                continue
+            cur = self.conn.execute(
+                "UPDATE run_papers SET status='pending', error=NULL, updated_at=? "
+                "WHERE run_id=? AND paper_canonical_id=? AND status='error'",
+                (now, run_id, row["paper_canonical_id"]),
+            )
+            n += int(cur.rowcount or 0)
+        if n:
+            self._refresh_run_paper_counts(run_id)
+        return n
+
+    def requeue_skipped(self, run_id: str, canonical_ids: list[str]) -> int:
+        """Retry skips after full text showed up on disk."""
+        n = 0
+        now = utcnow()
+        for cid in canonical_ids:
+            cur = self.conn.execute(
+                "UPDATE run_papers SET status='pending', error=NULL, updated_at=? "
+                "WHERE run_id=? AND paper_canonical_id=? AND status='skipped_no_text'",
+                (now, run_id, cid),
+            )
+            n += int(cur.rowcount or 0)
+        if n:
+            self._refresh_run_paper_counts(run_id)
+        return n
+
+    def papers_with_status(self, run_id: str, status: str) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT paper_canonical_id FROM run_papers WHERE run_id=? AND status=?",
+            (run_id, status),
+        ).fetchall()
+        return [r["paper_canonical_id"] for r in rows]
+
     def release_paper(self, run_id: str, paper_canonical_id: str) -> None:
         """Return an in-flight paper to pending (backend died; do not record an error)."""
         self.conn.execute(
@@ -336,6 +397,9 @@ class ClaimStore:
             "WHERE run_id=? AND paper_canonical_id=?",
             (status, tokens_used, error, utcnow(), run_id, paper_canonical_id),
         )
+        self._refresh_run_paper_counts(run_id)
+
+    def _refresh_run_paper_counts(self, run_id: str) -> None:
         done = self.conn.execute(
             "SELECT COUNT(*) AS n FROM run_papers WHERE run_id=? AND status='done'",
             (run_id,),
@@ -562,6 +626,9 @@ class ClaimStore:
             "papers_pending": pending,
             "papers_extracting": extracting,
             "pause_requested": bool(row["pause_requested"]),
+            "llm_backend": row["llm_backend"] if "llm_backend" in row.keys() else None,
+            "llm_model": row["llm_model"] if "llm_model" in row.keys() else None,
+            "schema_id": row["schema_id"] if "schema_id" in row.keys() else None,
         }
 
 

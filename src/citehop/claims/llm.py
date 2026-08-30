@@ -39,6 +39,23 @@ class BackendUnavailable(LLMError):
     """Transport/process down. Pause the run; do not mark the current paper failed."""
 
 
+def retryable_backend_message(message: str) -> bool:
+    """True when a paper 'error' is the engine not being ready, not bad JSON."""
+    low = (message or "").lower()
+    needles = (
+        "model is still loading",
+        "http 503",
+        "http 429",
+        "http 408",
+        "not reachable",
+        "read timed out",
+        "connection refused",
+        "connection reset",
+        "generation cancelled",
+    )
+    return any(n in low for n in needles)
+
+
 class ContextTooLong(LLMError):
     """Prompt exceeded the model's context window. Caller may retry with a shorter paper clip."""
 

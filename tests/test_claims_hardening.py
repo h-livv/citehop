@@ -934,6 +934,186 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("No corpora yet", corpus)
         self.assertIn("Select a project on the Projects tab", extract)
 
+    def test_retryable_backend_message_matches_loading_not_json(self) -> None:
+        from citehop.claims.llm import retryable_backend_message
+
+        self.assertTrue(
+            retryable_backend_message(
+                'FreeToken HTTP 503: {"error":"model is still loading"}'
+            )
+        )
+        self.assertFalse(retryable_backend_message("Model output was not valid JSON"))
+
+    def test_start_run_records_backend_model_and_schema(self) -> None:
+        corpus = _write_corpus(self.root / "c-id", "p-id", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Identity", corpus, template_id="recipe_claims")
+        status = self.api.start_run(proj["project_id"])
+        self.assertEqual(status["llm_backend"], "fixture")
+        self.assertEqual(status["llm_model"], "fixture")
+        self.assertTrue(status["schema_id"])
+        self.api.pause_run(proj["project_id"])
+
+    def test_abstract_only_header_is_not_fed_to_the_model(self) -> None:
+        from citehop.claims.engine import load_paper_text
+
+        corpus = self.root / "c-abs"
+        text = (
+            "[abstract_only]\n\n"
+            "An ingredient substitution is allowed: use margarine in place of butter. "
+            "A cooking time estimate for the stew is 45 minutes at 180 degrees."
+        )
+        corpus = _write_corpus(corpus, "p-abs", "Abstract only", text)
+        loaded = load_paper_text(
+            corpus, {"canonical_id": "p-abs", "file_id": file_id("p-abs")}
+        )
+        self.assertIsNotNone(loaded)
+        self.assertFalse(loaded.startswith("[abstract_only]"))
+        proj = self.api.create_project("Abs header", corpus, template_id="recipe_claims")
+        status = _run_until_idle(self.api, proj["project_id"])
+        self.assertEqual(status["status"], "completed")
+        claims = self.api.list_claims(proj["project_id"])
+        self.assertTrue(claims)
+        for claim in claims:
+            self.assertNotIn("[abstract_only]", claim["quoted_source_span"])
+            self.assertNotIn("[abstract_only]", claim["claim_text"])
+
+    def test_loading_503_pauses_and_leaves_paper_pending(self) -> None:
+        from citehop.claims.llm import LLMError
+
+        corpus = _write_corpus(self.root / "c-503", "p-503", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Loading", corpus, template_id="recipe_claims")
+        self.api.start_run(proj["project_id"])
+
+        class LoadingLLM:
+            name = "loading"
+
+            def complete(self, prompt: str) -> tuple[str, int]:
+                raise LLMError('FreeToken HTTP 503: {"error":"model is still loading"}')
+
+        with patch("citehop.claims.api._ready_llm", return_value=LoadingLLM()):
+            status = self.api.process_available(proj["project_id"], max_papers=1)
+        self.assertEqual(status["status"], "paused")
+        self.assertEqual(status["papers_done"], 0)
+        self.assertEqual(status["papers_pending"], 1)
+        store = ClaimStore(self.api.projects.db_path(proj["project_id"]))
+        try:
+            row = store.conn.execute(
+                "SELECT status, error FROM run_papers WHERE run_id=?",
+                (status["run_id"],),
+            ).fetchone()
+            self.assertEqual(row["status"], "pending")
+            self.assertIsNone(row["error"])
+        finally:
+            store.close()
+
+    def test_resume_requeues_retryable_errors_and_refreshes_counts(self) -> None:
+        corpus = _write_corpus(self.root / "c-requeue", "p-requeue", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Requeue", corpus, template_id="recipe_claims")
+        status = self.api.start_run(proj["project_id"])
+        self.api.pause_run(proj["project_id"])
+        store = ClaimStore(self.api.projects.db_path(proj["project_id"]))
+        try:
+            store.complete_paper(
+                status["run_id"],
+                "p-requeue",
+                status="error",
+                error='FreeToken HTTP 503: {"error":"model is still loading"}',
+            )
+        finally:
+            store.close()
+        after_error = self.api.run_status(proj["project_id"])
+        self.assertEqual(after_error["papers_skipped"], 1)
+        self.assertEqual(after_error["papers_pending"], 0)
+        resumed = self.api.resume_run(proj["project_id"])
+        self.assertEqual(resumed["status"], "running")
+        self.assertEqual(resumed["papers_pending"], 1)
+        self.assertEqual(resumed["papers_skipped"], 0)
+
+    def test_resume_requeues_skipped_once_text_exists(self) -> None:
+        from citehop.store import Manifest
+
+        corpus = self.root / "c-skip"
+        corpus.mkdir(parents=True)
+        (corpus / "text").mkdir()
+        fid = file_id("p-skip")
+        manifest = Manifest(corpus / "manifest.db")
+        try:
+            manifest.upsert_paper(
+                {
+                    "canonical_id": "p-skip",
+                    "file_id": fid,
+                    "status": "pending",
+                    "relation_to_seed": "seed",
+                    "title": "Later text",
+                    "abstract": "",
+                    "full_text_available": 0,
+                    "metadata": {},
+                }
+            )
+        finally:
+            manifest.close()
+        proj = self.api.create_project("Skip then text", corpus, template_id="recipe_claims")
+        status = _run_until_idle(self.api, proj["project_id"])
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["papers_skipped"], 1)
+        (corpus / "text" / f"{fid}.txt").write_text(RECIPE_TEXT, encoding="utf-8")
+        # Completed runs refuse resume; start a new run would re-extract everything.
+        # Simulate the paused qc4hep case: mark skipped on a paused run.
+        store = ClaimStore(self.api.projects.db_path(proj["project_id"]))
+        try:
+            store.set_run_status(status["run_id"], "paused")
+            store.conn.execute(
+                "UPDATE run_papers SET status='skipped_no_text', error=NULL WHERE run_id=?",
+                (status["run_id"],),
+            )
+            store._refresh_run_paper_counts(status["run_id"])
+        finally:
+            store.close()
+        resumed = self.api.resume_run(proj["project_id"])
+        self.assertEqual(resumed["papers_pending"], 1)
+        while resumed["status"] == "running":
+            resumed = self.api.process_available(proj["project_id"], max_papers=1)
+        self.assertEqual(resumed["status"], "completed")
+        self.assertEqual(resumed["papers_done"], 1)
+        self.assertTrue(self.api.list_claims(proj["project_id"]))
+
+    def test_export_claims_json_is_a_complete_handoff(self) -> None:
+        import json
+
+        corpus = _write_corpus(self.root / "c-export", "p-export", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Export", corpus, template_id="recipe_claims")
+        _run_until_idle(self.api, proj["project_id"])
+        claims = self.api.list_claims(proj["project_id"])
+        self.assertTrue(claims)
+        reviewed = self.api.review_claim(proj["project_id"], claims[0]["claim_id"], "confirm")
+        self.assertEqual(reviewed["verification_status"], "human_confirmed")
+        dest = self.root / "handoff.json"
+        result = self.api.export_claims(proj["project_id"], dest)
+        self.assertEqual(result["claim_count"], len(claims))
+        payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(payload["format"], "citehop.claims.v1")
+        self.assertIn("Citehop's job ends at this file", payload["handoff"])
+        self.assertEqual(payload["run"]["llm_backend"], "fixture")
+        self.assertTrue(payload["schema"]["schema_id"])
+        exported_ids = {c["claim_id"] for c in payload["claims"]}
+        self.assertEqual(exported_ids, {c["claim_id"] for c in claims})
+        confirmed = [
+            c for c in payload["claims"] if c["verification_status"] == "human_confirmed"
+        ]
+        self.assertEqual(len(confirmed), 1)
+        self.assertEqual(confirmed[0]["claim_id"], claims[0]["claim_id"])
+        self.assertIn("claim_text", payload["claims"][0])
+        self.assertIn("quoted_source_span", payload["claims"][0])
+        self.assertIn("structured_fields", payload["claims"][0])
+        self.assertIn("agreement", payload["claims"][0])
+        filtered = self.api.export_claims(
+            proj["project_id"],
+            self.root / "confirmed-only.json",
+            verification_status="human_confirmed",
+        )
+        only = json.loads(Path(filtered["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(len(only["claims"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,8 +5,10 @@ The desktop UI and CLI call only this module — never engine internals.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -152,11 +154,15 @@ class ClaimsAPI:
                 raise ExtractionError("Corpus has no papers")
             select_backend()
             clear_generation_abort()
+            identity = self._run_identity(project_id)
             run_id = store.create_run(
                 project_id,
                 [{"canonical_id": p["canonical_id"], "file_id": p["file_id"]} for p in papers],
                 token_budget=int(project.get("token_budget") or 500_000),
                 time_budget_seconds=project.get("time_budget_seconds"),
+                llm_backend=identity["llm_backend"],
+                llm_model=identity["llm_model"],
+                schema_id=identity["schema_id"],
             )
             status = store.run_status_dict(run_id)
             assert status is not None
@@ -201,6 +207,15 @@ class ClaimsAPI:
             select_backend()
             clear_generation_abort()
             store.requeue_extracting(run["run_id"])
+            store.requeue_retryable_errors(run["run_id"])
+            corpus_dir = Path(project["corpus_dir"])
+            papers_by_id = {p["canonical_id"]: p for p in corpus_papers(corpus_dir)}
+            ready: list[str] = []
+            for cid in store.papers_with_status(run["run_id"], "skipped_no_text"):
+                paper = papers_by_id.get(cid) or {"canonical_id": cid}
+                if load_paper_text(corpus_dir, paper):
+                    ready.append(cid)
+            store.requeue_skipped(run["run_id"], ready)
             remaining = store.next_pending_paper(run["run_id"])
             used = int(run["tokens_used"])
             budget = int(project.get("token_budget") or run["token_budget"])
@@ -424,6 +439,103 @@ class ClaimsAPI:
             "file_id": fid,
             "text": text,
             "pdf_path": str(pdf) if pdf.is_file() else None,
+        }
+
+    def export_claims(
+        self,
+        project_id: str,
+        dest: Path | None = None,
+        *,
+        run_id: str | None = None,
+        verification_status: str | None = None,
+    ) -> dict[str, Any]:
+        """Write claims + review state as JSON. Citehop's job ends at this file."""
+        project = self.projects.get_project(project_id)
+        schema = self.get_schema(project_id)
+        store = self._store(project_id)
+        try:
+            run = store.get_run(run_id) if run_id else store.latest_run(project_id)
+            if not run:
+                raise ExtractionError("No extraction run to export")
+            rid = run["run_id"]
+            status = store.run_status_dict(rid)
+            assert status is not None
+            claims = store.query_claims(
+                project_id,
+                run_id=rid,
+                verification_status=verification_status or None,
+            )
+        finally:
+            store.close()
+        payload = {
+            "format": "citehop.claims.v1",
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "handoff": (
+                "Citehop's job ends at this file. These are extracted spans plus "
+                "your review flags (confirm / reject / edit). Interpreting them as "
+                "a research conclusion, a problem statement, or input to another "
+                "tool is yours."
+            ),
+            "project": {
+                "project_id": project["project_id"],
+                "display_name": project.get("display_name"),
+                "corpus_dir": project.get("corpus_dir"),
+            },
+            "schema": {
+                "schema_id": schema.get("schema_id"),
+                "project_domain_label": schema.get("project_domain_label") or "",
+                "claim_types": [
+                    {
+                        "type_id": ct["type_id"],
+                        "display_name": ct.get("display_name"),
+                        "description": ct.get("description"),
+                    }
+                    for ct in schema.get("claim_types") or []
+                ],
+            },
+            "run": {
+                "run_id": status["run_id"],
+                "status": status["status"],
+                "llm_backend": status.get("llm_backend"),
+                "llm_model": status.get("llm_model"),
+                "schema_id": status.get("schema_id"),
+                "started_at": status.get("started_at"),
+                "updated_at": status.get("updated_at"),
+                "papers_total": status.get("papers_total"),
+                "papers_done": status.get("papers_done"),
+                "papers_skipped": status.get("papers_skipped"),
+                "papers_pending": status.get("papers_pending"),
+                "tokens_used": status.get("tokens_used"),
+            },
+            "agreement_counts": dict(Counter(c["agreement"] for c in claims)),
+            "verification_counts": dict(Counter(c["verification_status"] for c in claims)),
+            "claims": claims,
+        }
+        if dest is None:
+            dest = self.projects.project_dir(project_id) / "exports" / f"claims-{rid}.json"
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(dest)
+        return {"path": str(dest), "claim_count": len(claims), "run_id": rid}
+
+    def _run_identity(self, project_id: str) -> dict[str, str | None]:
+        schema = self.get_schema(project_id)
+        env = (os.environ.get("CITEHOP_LLM") or "").strip().lower()
+        if env in ("fixture", "grounded", "test"):
+            return {
+                "llm_backend": "fixture",
+                "llm_model": "fixture",
+                "schema_id": schema.get("schema_id"),
+            }
+        from citehop.models import load_settings
+
+        settings = load_settings() or {}
+        return {
+            "llm_backend": settings.get("backend"),
+            "llm_model": settings.get("model"),
+            "schema_id": schema.get("schema_id"),
         }
 
 

@@ -20,6 +20,7 @@ from .llm import (
     check_cancelled,
     complete_prompt,
     parse_claims_json,
+    retryable_backend_message,
     select_backend,
 )
 from .locate import locate_span
@@ -34,12 +35,19 @@ class ExtractionError(RuntimeError):
     pass
 
 
+_ABSTRACT_ONLY_HEADER = "[abstract_only]\n\n"
+
+
 def load_paper_text(corpus_dir: Path, paper: dict[str, Any]) -> str | None:
     """Literal stored text for this paper. Never model memory."""
     fid = paper.get("file_id") or file_id(paper["canonical_id"])
     path = Path(corpus_dir) / "text" / f"{fid}.txt"
     if path.is_file():
         text = path.read_text(encoding="utf-8", errors="replace")
+        if text.startswith(_ABSTRACT_ONLY_HEADER):
+            text = text[len(_ABSTRACT_ONLY_HEADER) :]
+        elif text.startswith("[abstract_only]\n"):
+            text = text[len("[abstract_only]\n") :]
         if text.strip():
             return text
     abstract = (paper.get("abstract") or "").strip()
@@ -307,6 +315,9 @@ def process_one_paper(
         store.release_paper(run_id, cid)
         raise
     except (LLMError, SchemaError, ExtractionError) as exc:
+        if isinstance(exc, LLMError) and retryable_backend_message(str(exc)):
+            store.release_paper(run_id, cid)
+            raise BackendUnavailable(str(exc)) from exc
         store.complete_paper(run_id, cid, status="error", error=str(exc))
         return "error"
     store.complete_paper(
