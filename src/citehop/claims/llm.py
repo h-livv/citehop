@@ -64,14 +64,15 @@ class _GenerationGate:
             sess = self._session
             uid = self._ft_uid
             self._response = None
-            self._ft_uid = None
+        if uid is None:
+            uid = _load_ft_uid()
+        # Must finish in this process. A daemon thread dies with Citehop and FreeToken
+        # keeps prefilling/decoding; Desktop has no cancel for API requests.
         if uid is not None:
-            threading.Thread(
-                target=_send_freetoken_abort,
-                args=(uid,),
-                name="citehop-ft-abort",
-                daemon=True,
-            ).start()
+            _send_freetoken_abort(uid)
+            _clear_stored_ft_uid()
+            with self._lock:
+                self._ft_uid = None
         for obj in (resp, sess):
             _close_http(obj)
 
@@ -79,6 +80,7 @@ class _GenerationGate:
         self._abort.clear()
         with self._lock:
             self._ft_uid = None
+        _clear_stored_ft_uid()
 
     def aborted(self) -> bool:
         return self._abort.is_set()
@@ -87,7 +89,6 @@ class _GenerationGate:
         with self._lock:
             self._session = session
             self._response = response
-            self._ft_uid = None
 
     def unbind(self) -> None:
         with self._lock:
@@ -101,6 +102,7 @@ class _GenerationGate:
             return
         with self._lock:
             self._ft_uid = uid
+        _store_ft_uid(uid)
 
 
 _GATE = _GenerationGate()
