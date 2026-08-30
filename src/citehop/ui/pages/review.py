@@ -35,7 +35,7 @@ from citehop.claims.locate import clamp_span
 from citehop.ui.pages import Page
 from citehop.ui.paper_viewer import PaperQuoteWindow
 from citehop.ui.widgets import card, muted
-from citehop.ui.theme import ACCENT
+from citehop.ui.theme import HIGHLIGHT, HIGHLIGHT_TEXT
 
 
 class ReviewPage(Page):
@@ -454,8 +454,8 @@ def _highlight(view: QTextEdit, start: int, end: int) -> None:
     cursor.setPosition(start)
     cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
     fmt = QTextCharFormat()
-    fmt.setBackground(QColor(ACCENT))
-    fmt.setForeground(QColor("#06281d"))
+    fmt.setBackground(QColor(HIGHLIGHT))
+    fmt.setForeground(QColor(HIGHLIGHT_TEXT))
     sel = QTextEdit.ExtraSelection()
     sel.cursor = cursor
     sel.format = fmt

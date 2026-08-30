@@ -241,9 +241,10 @@ class MainWindow(QMainWindow):
         self.banner.setObjectName("banner")
         self.banner.setProperty("level", "ok")
         banner_l = QHBoxLayout(self.banner)
-        self.banner_text = QLabel("Local only. Metadata and OA copies — no paywall scraping.")
+        self.banner_text = QLabel("")
         self.banner_text.setWordWrap(True)
         banner_l.addWidget(self.banner_text)
+        self.banner.hide()
         main_l.addWidget(self.banner)
 
         pills = QHBoxLayout()
@@ -290,7 +291,7 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(14, 8, 14, 8)
         label = QLabel(f"{prefix}  —")
-        label.setStyleSheet("color:#9AA8B7;")
+        label.setObjectName("muted")
         layout.addWidget(label)
         return frame, label
 
@@ -314,6 +315,7 @@ class MainWindow(QMainWindow):
         self.banner.setProperty("level", level)
         self.banner.style().unpolish(self.banner)
         self.banner.style().polish(self.banner)
+        self.banner.setVisible(bool(text.strip()))
 
     @Slot(dict)
     def start_analysis(self, payload: dict) -> None:

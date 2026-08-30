@@ -20,7 +20,6 @@ def card(
     if title:
         label = QLabel(title)
         label.setObjectName("section")
-        label.setStyleSheet("font-size: 15px;")
         layout.addWidget(label)
     if subtitle:
         sub = QLabel(subtitle)

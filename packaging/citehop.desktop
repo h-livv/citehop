@@ -1,9 +1,14 @@
 [Desktop Entry]
 Type=Application
+Version=1.0
 Name=Citehop
+GenericName=Citation corpus
 Comment=Local 1-hop citation corpus around a seed paper
-Exec=/home/h-livv/opt/citehop/scripts/citehop
-Icon=/home/h-livv/opt/citehop/src/citehop/assets/citehop.svg
+Exec=/home/h-livv/opt/citehop/scripts/citehop ui
+Path=/home/h-livv/opt/citehop
+Icon=citehop
 Terminal=false
-Categories=Education;Science;
+StartupNotify=true
 StartupWMClass=citehop
+Categories=Education;Science;
+Keywords=papers;citations;arxiv;corpus;claims;

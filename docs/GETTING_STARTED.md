@@ -43,6 +43,8 @@ VRAM; **Unload from VRAM** does.
 python -m citehop ui
 ```
 
+On this machine a menu launcher is `scripts/install-desktop.sh`. After that, **Citehop** is in the app grid; pin it to the dash if you want a taskbar click.
+
 The rest of this page uses the CLI so you can copy-paste it. The UI runs the
 same pipeline (Projects → Schema → Extract → Review).
 

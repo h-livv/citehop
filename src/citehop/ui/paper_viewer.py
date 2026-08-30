@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from citehop.claims.locate import clamp_span
 from citehop.claims.pdf_locate import copy_pdf_with_quote_highlight
-from citehop.ui.theme import ACCENT
+from citehop.ui.theme import HIGHLIGHT, HIGHLIGHT_TEXT
 from citehop.ui.widgets import muted
 
 try:
@@ -152,8 +152,8 @@ def _highlight(view: QTextEdit, start: int, end: int) -> None:
     cursor.setPosition(start)
     cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
     fmt = QTextCharFormat()
-    fmt.setBackground(QColor(ACCENT))
-    fmt.setForeground(QColor("#06281d"))
+    fmt.setBackground(QColor(HIGHLIGHT))
+    fmt.setForeground(QColor(HIGHLIGHT_TEXT))
     sel = QTextEdit.ExtraSelection()
     sel.cursor = cursor
     sel.format = fmt
