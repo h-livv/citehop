@@ -2,6 +2,8 @@
 
 Citehop is a **personal research tool**. It was built for my own literature work on my machine. It is **not** a product, not supported, and not meant to ship.
 
+**Do not clone this and expect it to run.** Corpus storage, model weights, presets, and other defaults are **hardcoded to my machine** (local disk paths, my email in the API user-agent, FreeToken/Machina layout). If you decide to run it anyway, you **must** change those paths and other personal wiring first. Skip that and it will write to the wrong disk, miss models, or fail outright. There is no installer and no portability layer. That is not a small cleanup — it is required, and it is on you.
+
 Given a seed paper, it builds a **local 1-hop citation corpus** (the seed, the papers it cites, and the papers that cite it), then runs a **local model** against a **schema you define** to pull out structured claims. You review those claims against the source and keep them as JSON.
 
 ## What you can do with it
@@ -31,7 +33,7 @@ Desktop: `python -m citehop ui`. A longer walkthrough is in [`docs/GETTING_START
 
 ## Status
 
-This repo matches **how I run it**: a Linux box, a local LLM, corpora on a local disk. Paths, models, and defaults are personal. Expect sharp edges, machine-specific assumptions, and no compatibility promise.
+This repo matches **how I run it**: a Linux box, a local LLM, corpora on a local disk. Paths, models, and defaults are personal. It will not work on another machine until those hardcoded locations and custom bits are replaced. Expect sharp edges and no compatibility promise.
 
 ## Later
 
