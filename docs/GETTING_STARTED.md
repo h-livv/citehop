@@ -1,13 +1,13 @@
-# Getting started with Citehop
+# Getting started with CiteHop
 
-**This walkthrough is how I run Citehop on my machine.** Defaults write under
+**This walkthrough is how I run CiteHop on my machine.** Defaults write under
 `/run/media/h-livv/Vault/CiteHop/`. If that path is not yours, stop and change
 config before you run anything. See the [root README](../README.md).
 
 Every flag, tab, script, and env var is listed in [USAGE.md](USAGE.md). This
 page is the path I actually use.
 
-Citehop builds a **local, resumable 1-hop citation corpus** around a seed paper
+CiteHop builds a **local, resumable 1-hop citation corpus** around a seed paper
 (the paper, the papers it cites, and the papers that cite it), then extracts
 structured claims from that corpus using a schema you choose. It talks only to
 live scholarly APIs (arXiv, Crossref, Semantic Scholar, OpenAlex, Unpaywall) and
@@ -19,7 +19,7 @@ This walkthrough uses a **non-physics seed** on purpose: Vaswani et al.,
 topic. QC4HEP / Di Meglio 2024 is a built-in named seed (`--preset qc4hep`); you
 can save others from Analyze.
 
-Citehop is **gather + extract that you still read**. It will not write a
+CiteHop is **gather + extract that you still read**. It will not write a
 literature review. Dual-pass `match` is two samples of the same model, not a
 validity check. Ingested citation counts can be lower than what Semantic Scholar
 or OpenAlex reported for the seed; the UI shows both.
@@ -45,7 +45,7 @@ Extraction projects live in `$CITEHOP_PROJECTS_DIR` (default
 `$CITEHOP_CORPORA_DIR/_projects/`).
 
 You also need an extraction model **already on this machine** (Ollama tag or
-FreeToken weights). Citehop will not download a model for you. In the desktop
+FreeToken weights). CiteHop will not download a model for you. In the desktop
 app: **Models** → select a model → **Use for extraction**. Pause does not unload
 VRAM; **Unload from VRAM** does.
 
@@ -56,7 +56,7 @@ scripts/citehop ui
 ```
 
 On this machine a menu launcher is `scripts/install-desktop.sh`. After that,
-**Citehop** is in the app grid; pin it to the dash if you want a taskbar click.
+**CiteHop** is in the app grid; pin it to the dash if you want a taskbar click.
 
 The rest of this page uses the CLI so you can copy-paste it. The UI runs the
 same pipeline: **Analyze** (sample/full fetch) → **Corpus** → **Models** →
@@ -190,7 +190,7 @@ are **review-queue hints**, not proof the science is correct.
 Read the quote against the paper. A `match` only means both passes agreed with
 each other.
 
-## 6. Export (this is where Citehop stops)
+## 6. Export (this is where CiteHop stops)
 
 From the app: **Review** → **Export JSON…** (and **Evidence table…** for
 confirmed rows), or **Extract** → **Open exports** after a run completes.
@@ -217,7 +217,7 @@ The JSON file looks like this (truncated):
 {
   "format": "citehop.claims.v1",
   "exported_at": "2026-08-30T18:00:00+00:00",
-  "handoff": "Citehop's job ends at this file. These are extracted spans plus your review flags …",
+  "handoff": "CiteHop's job ends at this file. These are extracted spans plus your review flags …",
   "project": { "project_id": "attention-is-all-you-need", "corpus_dir": "…" },
   "schema": { "schema_id": "…", "claim_types": [ { "type_id": "quantitative_result" } ] },
   "run": {
@@ -246,7 +246,7 @@ The JSON file looks like this (truncated):
 }
 ```
 
-**Citehop's job ends at this file.** What you do next — load it in a notebook,
+**CiteHop's job ends at this file.** What you do next — load it in a notebook,
 filter `human_confirmed`, write a review, or decide a research question — is
 your judgment. The software will not form a problem statement for you.
 
@@ -267,7 +267,7 @@ python scripts/audit_extract_drift.py --corpus DIR --project DIR
 
 See [USAGE.md](USAGE.md) for arguments.
 
-## What Citehop will not do
+## What CiteHop will not do
 
 - Expand to 2-hop citations unless you change the code (do not; 1-hop is the
   product).

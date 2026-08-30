@@ -1,4 +1,4 @@
-"""citehop — resumable 1-hop citation corpus builder for any seed paper."""
+"""CiteHop — resumable 1-hop citation corpus builder for any seed paper."""
 
 from pathlib import Path
 

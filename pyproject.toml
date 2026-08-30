@@ -1,7 +1,7 @@
 [project]
 name = "citehop"
 version = "1.0.0"
-description = "Resumable 1-hop citation corpus builder for any seed paper."
+description = "Finds citations and reviews literature claims locally."
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31.0",

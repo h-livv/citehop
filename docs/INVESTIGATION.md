@@ -208,6 +208,6 @@ When you next want the full extract: Models → Use for extraction (gpt-oss-20b)
 
 `GETTING_STARTED.md` is the user-facing walkthrough (Vaswani 2017 / arXiv
 1706.03762, not QC4HEP). Export of reviewed claims is `citehop extract export`
-(`citehop.claims.v1`). Citehop stops at that JSON; interpreting QC4HEP is the
+(`citehop.claims.v1`). CiteHop stops at that JSON; interpreting QC4HEP is the
 user's job. Full-scale extract did not run this session (model unloaded; 122
 false 503s now requeued on resume; OA fetch incomplete).

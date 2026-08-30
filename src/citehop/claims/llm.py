@@ -83,7 +83,7 @@ class _GenerationGate:
             self._response = None
         if uid is None:
             uid = _load_ft_uid()
-        # Must finish in this process. A daemon thread dies with Citehop and FreeToken
+        # Must finish in this process. A daemon thread dies with CiteHop and FreeToken
         # keeps prefilling/decoding; Desktop has no cancel for API requests.
         if uid is not None:
             _send_freetoken_abort(uid)
@@ -313,7 +313,7 @@ def abort_generation() -> None:
     """Stop the current model request. Safe to call from the UI or another thread.
 
     Closes the HTTP socket and, for FreeToken, synchronously sends the scheduler
-    AbortMsg for the in-flight uid. Disconnect and quitting Citehop do not stop
+    AbortMsg for the in-flight uid. Disconnect and quitting CiteHop do not stop
     FreeToken on their own; Desktop has no cancel for API generations.
     """
     _GATE.abort()

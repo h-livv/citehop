@@ -17,4 +17,4 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 
 echo "Installed $APP_DIR/citehop.desktop"
-echo "Citehop is in the app menu. Pin it from there if it is not on the dash."
+echo "CiteHop is in the app menu. Pin it from there if it is not on the dash."

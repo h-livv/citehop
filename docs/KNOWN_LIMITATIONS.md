@@ -39,7 +39,7 @@ before depending on the claims. Commands and UI: [USAGE.md](USAGE.md).
   distribution. The 74% match+partial figure is **FreeToken gpt-oss-20b** + the
   3-type `quantum_computing_review` schema on 18 completed papers, not 0.6B.
 - **Reloading gpt-oss-20b** (or any large instruct model) is a tens-of-hours
-  job on the remaining ~700 pending papers. Citehop will not start that unless
+  job on the remaining ~700 pending papers. CiteHop will not start that unless
   you load the model and press Resume.
 - **Machina `num_gpu` on a cached Ollama tag** — still coupled for Ollama;
   FreeToken ignores it. See `BUGS.md`.

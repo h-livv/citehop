@@ -586,7 +586,7 @@ class ClaimsAPI:
         run_id: str | None = None,
         verification_status: str | None = None,
     ) -> dict[str, Any]:
-        """Write claims + review state as JSON. Citehop's job ends at this file."""
+        """Write claims + review state as JSON. CiteHop's job ends at this file."""
         project = self.projects.get_project(project_id)
         schema = self.get_schema(project_id)
         store = self._store(project_id)
@@ -608,7 +608,7 @@ class ClaimsAPI:
             "format": "citehop.claims.v1",
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "handoff": (
-                "Citehop's job ends at this file. These are extracted spans plus "
+                "CiteHop's job ends at this file. These are extracted spans plus "
                 "your review flags (confirm / reject / edit). Interpreting them as "
                 "a research conclusion, a problem statement, or input to another "
                 "tool is yours."

@@ -237,7 +237,7 @@ def _extract_cmd(args: argparse.Namespace) -> int:
         from .claims.llm import abort_generation
 
         abort_generation()
-        print("Sent FreeToken abort for the last Citehop generation (if any).")
+        print("Sent FreeToken abort for the last CiteHop generation (if any).")
         return 0
     if cmd == "unload-model":
         result = api.unload_extraction_models()

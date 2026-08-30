@@ -1,4 +1,4 @@
-# Citehop — commands, UI, and scripts
+# CiteHop — commands, UI, and scripts
 
 How I invoke this tool on this machine. Defaults write under
 `/run/media/h-livv/Vault/CiteHop/`. Change `CITEHOP_CORPORA_DIR` (and related
@@ -34,7 +34,7 @@ full command and control list.
 7. **Export** `citehop.claims.v1` JSON. Optionally a markdown evidence table of
    rows you confirmed.
 
-Citehop stops at extracted spans plus your flags. It does not write a literature
+CiteHop stops at extracted spans plus your flags. It does not write a literature
 review or treat `match` as truth. Provider-reported citation counts (Semantic
 Scholar / OpenAlex) are shown next to ingested counts; 1-hop completeness is
 **not** enforced.
@@ -179,7 +179,7 @@ Verification values: `unverified_by_human`, `human_confirmed`, `human_rejected`,
 
 ## Desktop UI
 
-Launch: `python -m citehop ui`, the **Citehop** app-menu entry after
+Launch: `python -m citehop ui`, the **CiteHop** app-menu entry after
 `scripts/install-desktop.sh`, or `scripts/citehop ui`.
 
 Pages, left to right: **Analyze → Corpus → Models → Projects → Schema → Extract → Review**.
@@ -225,7 +225,7 @@ Browse corpora under `$CITEHOP_CORPORA_DIR`.
 ### Models
 
 Ollama tags on this box plus FreeToken weights (default Vault `freetoken/`).
-Citehop will not download a model. There is no Gemini/OpenAI (or other cloud
+CiteHop will not download a model. There is no Gemini/OpenAI (or other cloud
 LLM) backend.
 
 | Control | What it does |

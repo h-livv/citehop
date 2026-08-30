@@ -1,4 +1,4 @@
-"""Runtime configuration for citehop."""
+"""Runtime configuration for CiteHop."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def storage_warning() -> str:
         return ""
     return (
         f"Corpus disk is not mounted ({CORPORA_DIR}). "
-        "Mount the Vault drive, then Refresh or restart Citehop."
+        "Mount the Vault drive, then Refresh or restart CiteHop."
     )
 
 

@@ -1,6 +1,6 @@
 # Docs
 
-If you found this repo by accident: **start at the [root README](../README.md)**. Citehop is a private literature tool. It is not a product, not supported, and will not run on your machine until you rewrite hardcoded paths and other personal wiring. There is no installer.
+If you found this repo by accident: **start at the [root README](../README.md)**. CiteHop is a private literature tool. It is not a product, not supported, and will not run on your machine until you rewrite hardcoded paths and other personal wiring. There is no installer.
 
 This folder is extra context, not a user manual for a shipped app.
 
@@ -24,7 +24,7 @@ Lab notes, not onboarding:
 
 ## Workflow in one paragraph
 
-Point at a seed paper → build a **1-hop** corpus (seed + papers it cites + papers that cite it) → keep metadata and any **open-access** PDF/text → load a **model you already have** → create a **project** with a **schema you write** → extract claims → review them against the quote → take the JSON (optionally a markdown evidence table of confirmed rows). Citehop stops there. Interpreting the claims is yours.
+Point at a seed paper → build a **1-hop** corpus (seed + papers it cites + papers that cite it) → keep metadata and any **open-access** PDF/text → load a **model you already have** → create a **project** with a **schema you write** → extract claims → review them against the quote → take the JSON (optionally a markdown evidence table of confirmed rows). CiteHop stops there. Interpreting the claims is yours.
 
 QC4HEP / Di Meglio 2024 is one built-in named seed. You can save any other seed under a short name; the same path works for any paper the APIs can resolve.
 

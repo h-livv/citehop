@@ -192,7 +192,7 @@ def _make_builder(
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Citehop")
+        self.setWindowTitle("CiteHop")
         self.resize(1280, 880)
         self.setMinimumSize(980, 640)
         icon = icon_path()
@@ -216,9 +216,9 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(12, 18, 12, 12)
         side.setSpacing(4)
-        brand = QLabel("CITEHOP")
+        brand = QLabel("CiteHop")
         brand.setObjectName("brand")
-        sub = QLabel("Local 1-hop corpus")
+        sub = QLabel("Finds citations and reviews literature claims locally")
         sub.setObjectName("brandSub")
         side.addWidget(brand)
         side.addWidget(sub)
@@ -294,7 +294,7 @@ class MainWindow(QMainWindow):
 
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage(f"citehop  ·  live APIs  ·  {CORPORA_DIR}/<slug>/")
+        status.showMessage(f"CiteHop  ·  live APIs  ·  {CORPORA_DIR}/<slug>/")
 
         self.poll = QTimer(self)
         self.poll.setInterval(1500)
@@ -525,8 +525,8 @@ def _summary_from_progress(payload: object) -> CorpusSummary | None:
 
 def run_app() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Citehop")
-    app.setOrganizationName("Citehop")
+    app.setApplicationName("CiteHop")
+    app.setOrganizationName("CiteHop")
     app.setDesktopFileName("citehop")
     apply_theme(app)
     window = MainWindow()

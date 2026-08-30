@@ -1109,7 +1109,7 @@ class HardeningTests(unittest.TestCase):
         self.assertEqual(result["claim_count"], len(claims))
         payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
         self.assertEqual(payload["format"], "citehop.claims.v1")
-        self.assertIn("Citehop's job ends at this file", payload["handoff"])
+        self.assertIn("CiteHop's job ends at this file", payload["handoff"])
         self.assertEqual(payload["run"]["llm_backend"], "fixture")
         self.assertTrue(payload["schema"]["schema_id"])
         exported_ids = {c["claim_id"] for c in payload["claims"]}

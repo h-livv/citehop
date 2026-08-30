@@ -281,7 +281,7 @@ def generate_readme(manifest: Manifest) -> str:
     ]
     edges = manifest.all_edges()
     lines = [
-        "# citehop corpus — validation report",
+        "# CiteHop corpus — validation report",
         "",
         f"- Run mode: `{mode}`",
         f"- Run date range (UTC): `{started}` → `{finished}`",
