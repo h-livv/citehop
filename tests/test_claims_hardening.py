@@ -66,10 +66,16 @@ class HardeningTests(unittest.TestCase):
         os.environ["CITEHOP_LLM"] = "fixture"
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self._old_uid_path = os.environ.get("CITEHOP_FT_ABORT_UID_PATH")
+        os.environ["CITEHOP_FT_ABORT_UID_PATH"] = str(self.root / "ft-abort-uid")
         self.api = ClaimsAPI(projects_root=self.root / "projects")
 
     def tearDown(self) -> None:
         clear_generation_abort()
+        if self._old_uid_path is None:
+            os.environ.pop("CITEHOP_FT_ABORT_UID_PATH", None)
+        else:
+            os.environ["CITEHOP_FT_ABORT_UID_PATH"] = self._old_uid_path
         self.tmp.cleanup()
 
     def test_zero_field_claim_type_is_allowed_and_extracts(self) -> None:
@@ -418,6 +424,21 @@ class HardeningTests(unittest.TestCase):
         self.assertEqual(seen, [42])
         self.assertTrue(caught)
         self.assertIsInstance(caught[0], GenerationCancelled)
+
+    def test_abort_uses_persisted_freetoken_uid_after_quit(self) -> None:
+        from citehop.claims.llm import (
+            abort_generation,
+            clear_generation_abort,
+            _store_ft_uid,
+        )
+
+        clear_generation_abort()
+        seen: list[int] = []
+        _store_ft_uid(99)
+        with patch("citehop.claims.llm._send_freetoken_abort", side_effect=seen.append):
+            abort_generation()
+        self.assertEqual(seen, [99])
+        clear_generation_abort()
 
     def test_malformed_output_fails_one_paper_not_the_run(self) -> None:
         c1 = self.root / "c-junk"
@@ -778,6 +799,31 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("hello", text[start:end])
         self.assertIn("world", text[start:end])
 
+    def test_paper_source_includes_pdf_path_when_raw_pdf_exists(self) -> None:
+        import pymupdf
+
+        cdir = _write_corpus(self.root / "c-pdfsrc", "p-pdfsrc", "Has PDF", RECIPE_TEXT)
+        fid = file_id("p-pdfsrc")
+        (cdir / "raw").mkdir(exist_ok=True)
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "body")
+        doc.save(cdir / "raw" / f"{fid}.pdf")
+        doc.close()
+        proj = self.api.create_project("PdfSrc", cdir, template_id="recipe_claims")
+        src = self.api.paper_source(proj["project_id"], "p-pdfsrc")
+        self.assertTrue(src["pdf_path"])
+        self.assertTrue(Path(src["pdf_path"]).is_file())
+        src_no = self.api.paper_source(
+            self.api.create_project(
+                "NoPdf",
+                _write_corpus(self.root / "c-nopdf", "p-nopdf", "No PDF", RECIPE_TEXT),
+                template_id="recipe_claims",
+            )["project_id"],
+            "p-nopdf",
+        )
+        self.assertIsNone(src_no["pdf_path"])
+
     def test_backend_dies_after_first_paper_keeps_progress(self) -> None:
         cdir = self.root / "c-mid"
         _write_corpus(cdir, "paper-aaa", "A", RECIPE_TEXT)
@@ -884,6 +930,7 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("Select a project on the Projects tab to author a schema", schema)
         self.assertIn("No claims yet", review)
         self.assertIn("No claims with agreement=", review)
+        self.assertIn("Go to paper", review)
         self.assertIn("No corpora yet", corpus)
         self.assertIn("Select a project on the Projects tab", extract)
 

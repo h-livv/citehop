@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .config import CORPORA_DIR
 from .pipeline import BuildPaused, CorpusBuilder
 from .seed import PRESETS, query_from_args
 
@@ -25,7 +26,7 @@ def _add_seed_args(parser: argparse.ArgumentParser) -> None:
         "--corpus-dir",
         type=Path,
         default=None,
-        help="Output directory (default: ~/Library/Metadata/<seed-slug>/)",
+        help=f"Output directory (default: {CORPORA_DIR}/<seed-slug>/)",
     )
 
 
@@ -70,7 +71,7 @@ def main(argv: list[str] | None = None) -> None:
         "--corpus-dir",
         type=Path,
         default=None,
-        help="Corpus to export (default: every corpus under ~/Library/Metadata/).",
+        help=f"Corpus to export (default: every corpus under {CORPORA_DIR}/).",
     )
 
     extract = sub.add_parser(
@@ -80,6 +81,14 @@ def main(argv: list[str] | None = None) -> None:
     ex = extract.add_subparsers(dest="extract_cmd", required=True)
     ex.add_parser("templates", help="List starter schema templates.")
     ex.add_parser("projects", help="List extraction projects.")
+    ex.add_parser(
+        "abort-model",
+        help="Abort an in-flight FreeToken generation (works after the UI has quit).",
+    )
+    ex.add_parser(
+        "unload-model",
+        help="Abort generation and unload FreeToken/Ollama from VRAM.",
+    )
     for name, help_text in (
         ("start", "Start a new extraction run."),
         ("pause", "Pause the current run."),
@@ -115,7 +124,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             targets = [item.path for item in list_corpora()]
         if not targets:
-            raise SystemExit("No corpora found under ~/Library/Metadata/.")
+            raise SystemExit(f"No corpora found under {CORPORA_DIR}/.")
         for path in targets:
             db = path / "manifest.db"
             if not db.is_file():
@@ -182,6 +191,16 @@ def _extract_cmd(args: argparse.Namespace) -> int:
     if cmd == "projects":
         for proj in api.list_projects():
             print(f"{proj['project_id']}\t{proj.get('display_name')}\t{proj.get('corpus_dir')}")
+        return 0
+    if cmd == "abort-model":
+        from .claims.llm import abort_generation
+
+        abort_generation()
+        print("Sent FreeToken abort for the last Citehop generation (if any).")
+        return 0
+    if cmd == "unload-model":
+        result = api.unload_extraction_models()
+        print(result.get("message") or json.dumps(result))
         return 0
     pid = args.project
     if cmd == "start":

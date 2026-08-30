@@ -63,12 +63,26 @@ class LoadWorker(QThread):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class UnloadWorker(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            result = ClaimsAPI().unload_extraction_models()
+            self.done.emit(result)
+        except (LLMError, RuntimeError, ValueError) as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 class ModelsPage(Page):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.api = ClaimsAPI()
         self._rows: list[dict[str, Any]] = []
-        self._worker: LoadWorker | None = None
+        self._worker: QThread | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -89,9 +103,16 @@ class ModelsPage(Page):
         use = QPushButton("Use for extraction")
         use.setObjectName("accent")
         use.clicked.connect(self._use)
+        unload = QPushButton("Unload from VRAM")
+        unload.setToolTip(
+            "Abort any in-flight generation and stop the FreeToken engine so GPU memory is freed. "
+            "Extract Pause only cancels the request; the weights stay loaded until you unload."
+        )
+        unload.clicked.connect(self._unload)
         btns = QHBoxLayout()
         btns.addWidget(refresh)
         btns.addWidget(use)
+        btns.addWidget(unload)
         btns.addStretch()
         btn_w = QWidget()
         btn_w.setLayout(btns)
@@ -103,7 +124,9 @@ class ModelsPage(Page):
                 btn_w,
                 title="Models",
                 subtitle="Ollama tags on this machine, plus FreeToken weights on Vault. "
-                "Ollama loads with Machina's saved max GPU layers. No sampling knobs.",
+                "Ollama loads with Machina's saved max GPU layers. No sampling knobs. "
+                "Unload from VRAM stops FreeToken's engine (and any Ollama tag) so the GPU is free. "
+                "Extract Pause only aborts the current request; it does not unload weights.",
                 expand=True,
             ),
             1,
@@ -158,7 +181,7 @@ class ModelsPage(Page):
             QMessageBox.information(self, "Models", "Select a model first.")
             return
         if self._worker and self._worker.isRunning():
-            QMessageBox.information(self, "Models", "A load is already running.")
+            QMessageBox.information(self, "Models", "A load or unload is already running.")
             return
         self.status.setText(f"Loading {row.get('backend')} {row.get('model')}…")
         worker = LoadWorker(row)
@@ -166,6 +189,24 @@ class ModelsPage(Page):
         worker.done.connect(self._on_loaded)
         worker.failed.connect(self._on_fail)
         worker.start()
+
+    def _unload(self) -> None:
+        if self._worker and self._worker.isRunning():
+            QMessageBox.information(self, "Models", "A load or unload is already running.")
+            return
+        self.status.setText("Unloading model from VRAM…")
+        worker = UnloadWorker()
+        self._worker = worker
+        worker.done.connect(self._on_unloaded)
+        worker.failed.connect(self._on_fail)
+        worker.start()
+
+    @Slot(object)
+    def _on_unloaded(self, result: object) -> None:
+        payload = result if isinstance(result, dict) else {}
+        msg = str(payload.get("message") or "Unloaded.")
+        self.status.setText(msg)
+        self.reload()
 
     @Slot(object)
     def _on_loaded(self, result: object) -> None:

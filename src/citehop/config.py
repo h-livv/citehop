@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_CORPORA = Path.home() / "Library" / "Metadata"
+_DEFAULT_CORPORA = Path("/run/media/h-livv/Vault/CiteHop")
 
 
 def _corpora_dir() -> Path:

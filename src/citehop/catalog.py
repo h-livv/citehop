@@ -1,4 +1,4 @@
-"""Read-only listing of corpora and papers under ~/Library/Metadata."""
+"""Read-only listing of corpora and papers under the configured corpora directory."""
 
 from __future__ import annotations
 

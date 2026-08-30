@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from citehop import icon_path
 from citehop.catalog import summarize_corpus
+from citehop.config import CORPORA_DIR
 from citehop.pipeline import BuildPaused, CorpusBuilder
 from citehop.seed import PRESETS, SeedQuery
 from citehop.ui.pages.analyze import AnalyzePage
@@ -245,7 +246,7 @@ class MainWindow(QMainWindow):
 
         status = QStatusBar()
         self.setStatusBar(status)
-        status.showMessage("citehop  ·  live APIs  ·  ~/Library/Metadata/<slug>/")
+        status.showMessage(f"citehop  ·  live APIs  ·  {CORPORA_DIR}/<slug>/")
 
         self.poll = QTimer(self)
         self.poll.setInterval(1500)
@@ -395,5 +396,12 @@ def run_app() -> int:
     app.setDesktopFileName("citehop")
     apply_theme(app)
     window = MainWindow()
+
+    def _abort_model() -> None:
+        from citehop.claims.llm import abort_generation
+
+        abort_generation()
+
+    app.aboutToQuit.connect(_abort_model)
     window.show()
     return app.exec()

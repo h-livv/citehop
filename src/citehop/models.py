@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -416,20 +418,146 @@ def _wait_freetoken_engine(timeout_s: float) -> None:
     raise RuntimeError(f"FreeToken engine did not become ready in {int(timeout_s)}s. {last}")
 
 
+def unload_loaded_models(timeout_s: float = 45.0) -> dict[str, Any]:
+    """Abort the in-flight request and free GPU memory.
+
+    Pause/Stop generation only cancel decode. FreeToken keeps weights in VRAM until
+    the daemon's ``/engine/stop`` actually kills the serve process.
+    """
+    from citehop.claims.llm import abort_generation
+
+    abort_generation()
+    ft = _stop_freetoken(timeout_s=timeout_s)
+    ollama_names = _unload_ollama()
+    bits = []
+    if ft.get("skipped") and not ft.get("stopped"):
+        bits.append("FreeToken daemon not reachable")
+    elif ft.get("already"):
+        bits.append("FreeToken engine was not running")
+    elif ft.get("stopped"):
+        bits.append("FreeToken engine stopped")
+    if ollama_names:
+        bits.append("unloaded Ollama " + ", ".join(ollama_names))
+    if not bits:
+        bits.append("nothing was loaded")
+    return {
+        "ok": True,
+        "freetoken": ft,
+        "ollama": ollama_names,
+        "message": "; ".join(bits) + ". VRAM should be free shortly.",
+    }
+
+
+def _stop_freetoken(timeout_s: float = 45.0) -> dict[str, Any]:
+    """POST /engine/stop with force, then wait until the serve is gone."""
+    if not freetoken_daemon_reachable():
+        return {"skipped": True, "already": True}
+    status = _freetoken_status()
+    if not status.get("running") and not status.get("starting") and not status.get("stopping"):
+        _wait_freetoken_vram(timeout_s=min(8.0, timeout_s))
+        return {"stopped": True, "already": True}
+    try:
+        r = requests.post(
+            f"{freetoken_daemon()}/engine/stop",
+            json={"force": True},
+            timeout=max(15.0, min(timeout_s, 60.0)),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"FreeToken engine/stop failed: {exc}") from exc
+    if r.status_code >= 400:
+        raise RuntimeError(f"FreeToken engine/stop HTTP {r.status_code}: {r.text[:300]}")
+    payload = r.json() if r.content else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    deadline = time.monotonic() + timeout_s
+    last = payload
+    while time.monotonic() < deadline:
+        last = _freetoken_status() or last
+        if not last.get("running") and not last.get("starting"):
+            _wait_freetoken_vram(timeout_s=min(15.0, timeout_s))
+            return {"stopped": True, "already": bool(payload.get("already")), "status": last}
+        time.sleep(0.4)
+    raise RuntimeError(
+        "FreeToken engine did not exit after /engine/stop. "
+        "If FreeToken Desktop still shows the model loaded, stop it there."
+    )
+
+
+def _proc_cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(
+            "utf-8", "replace"
+        )
+    except OSError:
+        return ""
+
+
+def _freetoken_gpu_worker_pids() -> list[int]:
+    """Pids still holding the GPU after the daemon has marked the serve stopped."""
+    try:
+        raw = subprocess.check_output(
+            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+            timeout=2,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids: list[int] = []
+    for line in raw.splitlines():
+        pid_s = line.strip().split(",")[0].strip()
+        if not pid_s.isdigit():
+            continue
+        pid = int(pid_s)
+        cmd = _proc_cmdline(pid)
+        if ".freetoken" in cmd or "freetoken.cli" in cmd:
+            pids.append(pid)
+    return pids
+
+
+def _wait_freetoken_vram(timeout_s: float = 15.0) -> None:
+    """CUDA workers can outlive the serve PID by a few seconds."""
+    deadline = time.monotonic() + max(0.5, timeout_s)
+    leftover: list[int] = []
+    while time.monotonic() < deadline:
+        leftover = _freetoken_gpu_worker_pids()
+        if not leftover:
+            return
+        time.sleep(0.4)
+    for pid in leftover:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+    time.sleep(0.6)
+    for pid in _freetoken_gpu_worker_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            continue
+
+
 def _stop_freetoken_quiet() -> None:
     try:
-        requests.post(f"{freetoken_daemon()}/engine/stop", json={"force": True}, timeout=8)
-    except requests.RequestException:
+        _stop_freetoken(timeout_s=20.0)
+    except RuntimeError:
         return
 
 
-def _unload_ollama_quiet() -> None:
-    for name in _ollama_loaded_names():
+def _unload_ollama() -> list[str]:
+    names = sorted(_ollama_loaded_names())
+    unloaded: list[str] = []
+    for name in names:
         try:
             requests.post(
                 f"{OLLAMA_HOST}/api/generate",
                 json={"model": name, "prompt": "", "keep_alive": 0, "stream": False},
                 timeout=8,
             )
+            unloaded.append(name)
         except requests.RequestException:
             continue
+    return unloaded
+
+
+def _unload_ollama_quiet() -> None:
+    _unload_ollama()

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from citehop.catalog import CorpusSummary, list_corpora, load_papers
+from citehop.config import CORPORA_DIR
 from citehop.ui.pages import Page
 from citehop.ui.widgets import Kpi, card, muted
 
@@ -56,7 +57,7 @@ class CorpusPage(Page):
         root.addWidget(
             card(
                 pick_wrap,
-                muted("Stored in ~/Library/Metadata. Each corpus is one seed plus the papers it cites and the papers that cite it."),
+                muted(f"Stored in {CORPORA_DIR}. Each corpus is one seed plus the papers it cites and the papers that cite it."),
                 title="Corpora",
             )
         )

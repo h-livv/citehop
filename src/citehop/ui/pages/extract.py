@@ -98,7 +98,7 @@ class ExtractPage(Page):
         root.addWidget(
             card(
                 btn_w,
-                muted("Dual-pass extraction against this project's schema. Pause aborts the in-flight FreeToken/Ollama request (including prefill); the current paper is retried on resume."),
+                muted("Dual-pass extraction against this project's schema. Pause aborts the in-flight FreeToken/Ollama request; the current paper is retried on resume. Weights stay in VRAM until you Unload from VRAM on the Models tab."),
                 title="Run",
             )
         )
@@ -117,11 +117,15 @@ class ExtractPage(Page):
         self.poll.stop()
         if self._worker and self._worker.isRunning():
             self._worker.requestInterruption()
-            if self._project_id:
-                try:
-                    self.api.pause_run(self._project_id)
-                except ExtractionError:
-                    pass
+        if self._project_id:
+            try:
+                self.api.pause_run(self._project_id)
+            except ExtractionError:
+                pass
+        from citehop.claims.llm import abort_generation
+
+        abort_generation()
+        if self._worker and self._worker.isRunning():
             self._worker.wait(5000)
 
     def hideEvent(self, event) -> None:  # noqa: ANN001
@@ -220,7 +224,8 @@ class ExtractPage(Page):
             status = self.api.pause_run(self._project_id)
             self._apply_status(status)
             self.log.appendPlainText(
-                "Paused. FreeToken/Ollama request aborted; in-flight paper stays pending."
+                "Paused. Request aborted; in-flight paper stays pending. "
+                "Weights stay in VRAM until Unload from VRAM on the Models tab."
             )
         except ExtractionError as exc:
             QMessageBox.warning(self, "Extract", str(exc))

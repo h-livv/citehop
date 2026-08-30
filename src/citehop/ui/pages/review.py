@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from citehop.claims.api import ClaimsAPI, ProjectError, SchemaError
 from citehop.claims.locate import clamp_span
 from citehop.ui.pages import Page
+from citehop.ui.paper_viewer import PaperQuoteWindow
 from citehop.ui.widgets import card, muted
 from citehop.ui.theme import ACCENT
 
@@ -40,6 +41,7 @@ class ReviewPage(Page):
         self.api = ClaimsAPI()
         self._claims: list[dict[str, Any]] = []
         self._schema: dict[str, Any] | None = None
+        self._paper_win: PaperQuoteWindow | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -89,13 +91,17 @@ class ReviewPage(Page):
         confirm.setObjectName("accent")
         reject = QPushButton("Reject")
         edit = QPushButton("Edit…")
+        self.go_paper = QPushButton("Go to paper")
+        self.go_paper.setEnabled(False)
         confirm.clicked.connect(lambda: self._review("confirm"))
         reject.clicked.connect(lambda: self._review("reject"))
         edit.clicked.connect(self._edit)
+        self.go_paper.clicked.connect(self._go_to_paper)
         actions = QHBoxLayout()
         actions.addWidget(confirm)
         actions.addWidget(reject)
         actions.addWidget(edit)
+        actions.addWidget(self.go_paper)
         actions.addStretch()
         act_w = QWidget()
         act_w.setLayout(actions)
@@ -171,6 +177,7 @@ class ReviewPage(Page):
         if not self._project_id:
             self.empty_lbl.setText("Select a project on the Projects tab.")
             self.empty_lbl.show()
+            self.go_paper.setEnabled(False)
             return
         try:
             self._claims = self.api.list_claims(
@@ -183,6 +190,7 @@ class ReviewPage(Page):
             QMessageBox.warning(self, "Review", str(exc))
             self.empty_lbl.setText(str(exc))
             self.empty_lbl.show()
+            self.go_paper.setEnabled(False)
             return
         self.table.setSortingEnabled(False)
         for claim in self._claims:
@@ -202,7 +210,9 @@ class ReviewPage(Page):
         if self.table.rowCount():
             self.empty_lbl.hide()
             self.table.selectRow(0)
+            self.go_paper.setEnabled(True)
         else:
+            self.go_paper.setEnabled(False)
             agree = self.f_agree.currentData()
             if agree:
                 self.empty_lbl.setText(
@@ -231,7 +241,9 @@ class ReviewPage(Page):
         if not claim:
             self.source.clear()
             self.detail.clear()
+            self.go_paper.setEnabled(False)
             return
+        self.go_paper.setEnabled(True)
         lines = [
             f"type: {claim.get('claim_type')}",
             f"agreement: {claim.get('agreement')}",
@@ -287,6 +299,29 @@ class ReviewPage(Page):
             QMessageBox.warning(self, "Review", str(exc))
             return
         self._reload_claims()
+
+    def _go_to_paper(self) -> None:
+        claim = self._selected_claim()
+        if not claim or not self._project_id:
+            return
+        try:
+            src = self.api.paper_source(claim["project_id"], claim["paper_canonical_id"])
+        except (KeyError, ProjectError, OSError) as exc:
+            QMessageBox.warning(self, "Go to paper", str(exc))
+            return
+        if not (src.get("text") or src.get("pdf_path")):
+            QMessageBox.information(
+                self,
+                "Go to paper",
+                "This paper has no stored text or PDF.",
+            )
+            return
+        if self._paper_win is None:
+            self._paper_win = PaperQuoteWindow(self)
+        self._paper_win.show_quote(src, claim)
+        self._paper_win.show()
+        self._paper_win.raise_()
+        self._paper_win.activateWindow()
 
 
 class EditClaimDialog(QDialog):

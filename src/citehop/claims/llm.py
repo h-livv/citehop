@@ -187,6 +187,41 @@ def _chatcmpl_uid(chunk_id: str | None) -> int | None:
     return None
 
 
+def _ft_uid_path() -> Path:
+    env = (os.environ.get("CITEHOP_FT_ABORT_UID_PATH") or "").strip()
+    if env:
+        return Path(env)
+    runtime = (os.environ.get("XDG_RUNTIME_DIR") or "").strip()
+    base = Path(runtime) if runtime else Path("/tmp")
+    return base / "citehop-freetoken-abort-uid"
+
+
+def _store_ft_uid(uid: int) -> None:
+    path = _ft_uid_path()
+    try:
+        path.write_text(str(uid), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _load_ft_uid() -> int | None:
+    path = _ft_uid_path()
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _clear_stored_ft_uid() -> None:
+    try:
+        _ft_uid_path().unlink(missing_ok=True)
+    except OSError:
+        return
+
+
 _FT_ABORT_PY = """
 import sys
 import msgpack
@@ -260,8 +295,9 @@ def _send_freetoken_abort(uid: int) -> None:
 def abort_generation() -> None:
     """Stop the current model request. Safe to call from the UI or another thread.
 
-    Closes the HTTP socket and, for FreeToken, sends the scheduler AbortMsg for the
-    in-flight uid (disconnect alone does not stop prefill).
+    Closes the HTTP socket and, for FreeToken, synchronously sends the scheduler
+    AbortMsg for the in-flight uid. Disconnect and quitting Citehop do not stop
+    FreeToken on their own; Desktop has no cancel for API generations.
     """
     _GATE.abort()
 

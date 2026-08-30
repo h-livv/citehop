@@ -66,3 +66,37 @@ def _map_collapsed_offset(original: str, collapsed_start: int, collapsed_len: in
     if start is None:
         start = 0
     return start, orig_i
+
+
+def collapse_ws(text: str) -> str:
+    return _WS.sub(" ", (text or "").strip())
+
+
+def search_needles(quote: str) -> list[str]:
+    """PDF/search strings derived from a quoted span, longest first.
+
+    Full quotes often fail in a PDF text layer (hyphenation, line breaks).
+    Shorter unique prefixes usually still land on the discussed passage.
+    """
+    collapsed = collapse_ws(quote)
+    if not collapsed:
+        return []
+    out: list[str] = []
+
+    def add(s: str) -> None:
+        s = collapse_ws(s)
+        if s and s not in out:
+            out.append(s)
+
+    add(collapsed)
+    if len(collapsed) > 96:
+        cut = collapsed[:96]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        add(cut)
+    words = collapsed.split()
+    if len(words) >= 12:
+        add(" ".join(words[:12]))
+    elif len(words) >= 6:
+        add(" ".join(words[:6]))
+    return out

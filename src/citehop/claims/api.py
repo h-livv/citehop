@@ -116,6 +116,11 @@ class ClaimsAPI:
         loaded = prepare_extraction()
         return {**settings, **loaded}
 
+    def unload_extraction_models(self) -> dict[str, Any]:
+        from citehop.models import unload_loaded_models
+
+        return unload_loaded_models()
+
     def _store(self, project_id: str) -> ClaimStore:
         self.projects.get_project(project_id)
         return ClaimStore(self.projects.db_path(project_id))
@@ -411,11 +416,14 @@ class ClaimsAPI:
         if not paper:
             raise KeyError(paper_canonical_id)
         text = load_paper_text(corpus_dir, paper) or ""
+        fid = paper.get("file_id") or file_id(paper_canonical_id)
+        pdf = corpus_dir / "raw" / f"{fid}.pdf"
         return {
             "paper_canonical_id": paper_canonical_id,
             "title": paper.get("title") or paper_canonical_id,
-            "file_id": paper.get("file_id") or file_id(paper_canonical_id),
+            "file_id": fid,
             "text": text,
+            "pdf_path": str(pdf) if pdf.is_file() else None,
         }
 
 
