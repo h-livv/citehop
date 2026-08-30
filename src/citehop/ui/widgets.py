@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+
+from citehop.config import storage_warning
 
 
 def card(
@@ -36,6 +38,27 @@ def muted(text: str) -> QLabel:
     label.setObjectName("muted")
     label.setWordWrap(True)
     return label
+
+
+class StorageBanner(QFrame):
+    """Vault/corpus warning. Only shown on pages that need LLM storage."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("banner")
+        self.setProperty("level", "critical")
+        layout = QHBoxLayout(self)
+        self._label = QLabel("")
+        self._label.setWordWrap(True)
+        layout.addWidget(self._label)
+        self.refresh()
+
+    def refresh(self) -> None:
+        msg = storage_warning()
+        self._label.setText(msg)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.setVisible(bool(msg.strip()))
 
 
 class Kpi(QFrame):

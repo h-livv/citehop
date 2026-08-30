@@ -139,7 +139,12 @@ def _make_builder(
     if not (seed.doi or seed.arxiv_id or seed.title or seed.preset):
         raise SystemExit("Provide a PDF with identifiers, or a DOI / arXiv id / title.")
     corpus_dir = seed.default_corpus_dir()
-    corpus_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SystemExit(
+            f"Cannot write {corpus_dir}. Mount the Vault drive first. ({exc})"
+        ) from exc
     if seed.pdf and seed.pdf.is_file():
         dest = corpus_dir / "seed.pdf"
         if seed.pdf.resolve() != dest.resolve():

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from citehop.claims.api import ClaimsAPI, ProjectError, SchemaError
 from citehop.ui.pages import Page
-from citehop.ui.widgets import card, muted
+from citehop.ui.widgets import StorageBanner, card, muted
 
 
 class ProjectsPage(Page):
@@ -34,6 +34,8 @@ class ProjectsPage(Page):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        self.storage = StorageBanner()
+        root.addWidget(self.storage)
         self.name = QLineEdit()
         self.name.setPlaceholderText("Project name")
         self.corpus = QComboBox()
@@ -93,9 +95,11 @@ class ProjectsPage(Page):
         root.addWidget(self._hint)
 
     def on_show(self) -> None:
+        self.storage.refresh()
         self.reload()
 
     def reload(self) -> None:
+        self.storage.refresh()
         self._fill_corpora()
         self._fill_templates()
         projects = self.api.list_projects()

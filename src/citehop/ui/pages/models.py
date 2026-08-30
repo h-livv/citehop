@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from citehop.claims.api import ClaimsAPI, LLMError
 from citehop.ui.pages import Page
-from citehop.ui.widgets import card, muted
+from citehop.ui.widgets import StorageBanner, card, muted
 
 
 def _fmt_bytes(n: int | None) -> str:
@@ -88,6 +88,8 @@ class ModelsPage(Page):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        self.storage = StorageBanner()
+        root.addWidget(self.storage)
         self.status = muted("Refresh, then select a model and use it for extraction.")
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(("Model", "Source", "GPU layers", "Size", "Loaded"))
@@ -133,9 +135,11 @@ class ModelsPage(Page):
         )
 
     def on_show(self) -> None:
+        self.storage.refresh()
         self.reload()
 
     def reload(self) -> None:
+        self.storage.refresh()
         self._rows = self.api.extraction_models()
         current = (self.api.extraction_model().get("settings") or {})
         self.table.setSortingEnabled(False)

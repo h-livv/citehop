@@ -34,7 +34,7 @@ from citehop.claims.files import claim_file_path
 from citehop.claims.locate import clamp_span
 from citehop.ui.pages import Page
 from citehop.ui.paper_viewer import PaperQuoteWindow
-from citehop.ui.widgets import card, muted
+from citehop.ui.widgets import StorageBanner, card, muted
 from citehop.ui.theme import HIGHLIGHT, HIGHLIGHT_TEXT
 
 
@@ -50,6 +50,8 @@ class ReviewPage(Page):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        self.storage = StorageBanner()
+        root.addWidget(self.storage)
         self.project_lbl = muted("No project selected.")
         filters = QHBoxLayout()
         self.f_type = QComboBox()
@@ -139,6 +141,7 @@ class ReviewPage(Page):
         root.addWidget(split, 1)
 
     def on_show(self) -> None:
+        self.storage.refresh()
         self._reload_all()
 
     def set_project(self, project_id: str | None) -> None:

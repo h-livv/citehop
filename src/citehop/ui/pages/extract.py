@@ -25,7 +25,7 @@ from citehop.claims.api import (
     SchemaError,
 )
 from citehop.ui.pages import Page
-from citehop.ui.widgets import Kpi, card, muted
+from citehop.ui.widgets import Kpi, StorageBanner, card, muted
 
 
 class ExtractWorker(QThread):
@@ -62,6 +62,8 @@ class ExtractPage(Page):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        self.storage = StorageBanner()
+        root.addWidget(self.storage)
         self.project_lbl = muted("No project selected.")
         self.model_lbl = muted("")
         kpis = QGridLayout()
@@ -109,6 +111,7 @@ class ExtractPage(Page):
         self.poll.timeout.connect(self._refresh_status)
 
     def on_show(self) -> None:
+        self.storage.refresh()
         self._refresh_header()
         self._refresh_status()
         self.poll.start()

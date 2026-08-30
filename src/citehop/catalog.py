@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import row_to_metadata
-from .config import CORPORA_DIR
+from .config import CORPORA_DIR, ensure_data_dirs
 from .store import Manifest
 
 RELATION_LABELS = {
@@ -90,6 +90,8 @@ def summarize_corpus(corpus_dir: Path) -> CorpusSummary | None:
 
 
 def list_corpora(root: Path | None = None) -> list[CorpusSummary]:
+    if root is None:
+        ensure_data_dirs()
     base = Path(root) if root else CORPORA_DIR
     if not base.is_dir():
         return []

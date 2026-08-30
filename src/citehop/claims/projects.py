@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from citehop.config import PROJECTS_DIR
+from citehop.config import PROJECTS_DIR, try_mkdir
 from citehop.store import utcnow
 
 from .schema import (
@@ -36,7 +36,7 @@ def slugify(name: str) -> str:
 class ProjectStore:
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root else PROJECTS_DIR
-        self.root.mkdir(parents=True, exist_ok=True)
+        try_mkdir(self.root)
 
     def project_dir(self, project_id: str) -> Path:
         return self.root / project_id
@@ -92,7 +92,13 @@ class ProjectStore:
             pid = f"{slugify(name)}-{n}"
             dest = self.project_dir(pid)
             n += 1
-        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ProjectError(
+                f"Cannot write project under {self.root}. "
+                f"Mount the Vault drive first. ({exc})"
+            ) from exc
         if template_id:
             schema = clone_schema(load_template(template_id), f"{pid}-schema")
         else:

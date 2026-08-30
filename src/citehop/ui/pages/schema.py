@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from citehop.claims.api import ClaimsAPI, ProjectError, SchemaError
 from citehop.ui.pages import Page
-from citehop.ui.widgets import card, muted
+from citehop.ui.widgets import StorageBanner, card, muted
 
 FIELD_TYPES = ("string", "number", "boolean", "enum")
 
@@ -45,6 +45,8 @@ class SchemaPage(Page):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        self.storage = StorageBanner()
+        root.addWidget(self.storage)
         self.schema_id = QLineEdit()
         self.domain_label = QLineEdit()
         self.domain_label.setPlaceholderText("Display only — never used as logic")
@@ -138,6 +140,7 @@ class SchemaPage(Page):
         self.fields.itemChanged.connect(self._store_current_type)
 
     def on_show(self) -> None:
+        self.storage.refresh()
         self._fill_templates()
         self._load()
 
