@@ -512,11 +512,21 @@ class CorpusBuilder:
         if not old_row:
             return
         dest = self.manifest.get_paper(new)
+        if dest and dest["canonical_id"] != old:
+            rec = {
+                "at": utcnow(),
+                "old_canonical_id": old,
+                "new_canonical_id": new,
+                "old_title": old_row["title"],
+                "dest_title": dest["title"],
+                "action": "skipped_dest_exists",
+            }
+            path = self.corpus_dir / "merge_conflicts.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            return
         new_fid = file_id(new)
         old_fid = old_row["file_id"]
-        if dest and dest["canonical_id"] != old:
-            # merge into dest; remap edges; drop old
-            pass
         data = dict(old_row)
         data["canonical_id"] = new
         data["file_id"] = new_fid

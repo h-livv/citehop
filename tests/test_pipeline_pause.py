@@ -108,6 +108,31 @@ class PipelinePauseTests(unittest.TestCase):
             client._sleep(8)
         self.assertLess(time.monotonic() - t0, 2.0)
 
+    def test_migrate_canonical_logs_conflict_and_keeps_dest(self) -> None:
+        import json
+
+        builder = self._builder()
+        builder.manifest.upsert_paper(_pending_paper("old-id"))
+        dest_row = _pending_paper("new-id")
+        dest_row["title"] = "Keep me"
+        builder.manifest.upsert_paper(dest_row)
+        builder.manifest.conn.execute(
+            "INSERT INTO edges(source, target, relation) VALUES(?,?,?)",
+            ("old-id", "new-id", "cites"),
+        )
+        builder.manifest.conn.commit()
+        builder._migrate_canonical("old-id", "new-id")
+        old = builder.manifest.get_paper("old-id")
+        dest = builder.manifest.get_paper("new-id")
+        self.assertIsNotNone(old)
+        self.assertEqual(dest["title"], "Keep me")
+        log_path = self.root / "corpus" / "merge_conflicts.jsonl"
+        rec = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(rec["old_canonical_id"], "old-id")
+        self.assertEqual(rec["new_canonical_id"], "new-id")
+        self.assertEqual(rec["action"], "skipped_dest_exists")
+        builder.manifest.close()
+
 
 if __name__ == "__main__":
     unittest.main()
