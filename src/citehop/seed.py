@@ -1,7 +1,8 @@
-"""Identify a seed paper from DOI, arXiv id, title, or a named preset."""
+"""Identify a seed paper from DOI, arXiv id, title, or a named seed."""
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -11,7 +12,7 @@ from .clients import arxiv as arxiv_api
 from .clients import crossref as crossref_api
 from .clients import openalex as openalex_api
 from .clients import s2 as s2_api
-from .config import CORPORA_DIR
+from .config import CONFIG_DIR, CORPORA_DIR
 from .extract import inspect_pdf
 from .http_client import RateLimitedClient
 from .ids import canonical_id, file_id, normalize_arxiv, normalize_doi
@@ -90,16 +91,122 @@ class SeedQuery:
         return CORPORA_DIR / self.slug()
 
 
-PRESETS: dict[str, SeedQuery] = {
-    "qc4hep": SeedQuery(
-        title="Quantum Computing for High-Energy Physics: State of the Art and Challenges",
-        author="Di Meglio",
-        venue="PRX Quantum",
-        year=2024,
-        pdf=Path("/home/h-livv/Library/Papers/QCHEP/PRXQuantum.5.037001.pdf"),
-        preset="qc4hep",
-    ),
-}
+_QC4HEP = SeedQuery(
+    title="Quantum Computing for High-Energy Physics: State of the Art and Challenges",
+    author="Di Meglio",
+    venue="PRX Quantum",
+    year=2024,
+    pdf=Path("/home/h-livv/Library/Papers/QCHEP/PRXQuantum.5.037001.pdf"),
+    preset="qc4hep",
+)
+
+_RESERVED_SEED_NAMES = frozenset({"unnamed", "unknown", "projects"})
+
+
+def named_seeds_path() -> Path:
+    return CONFIG_DIR / "named_seeds.json"
+
+
+def normalize_seed_name(raw: str) -> str:
+    """Filesystem-safe named-seed slug. Must start with a letter so it is not a DOI folder."""
+    text = (raw or "").strip().lower().replace(" ", "-")
+    slug = file_id(text)
+    if not slug or slug in _RESERVED_SEED_NAMES:
+        raise ValueError("Name a seed with letters (and optional numbers, dots, or hyphens).")
+    if not slug[0].isalpha():
+        raise ValueError("A named seed must start with a letter so it is not a DOI slug.")
+    if slug.startswith("_"):
+        raise ValueError(f"Reserved name: {slug}")
+    return slug
+
+
+def _query_to_json(q: SeedQuery) -> dict[str, Any]:
+    n = q.normalized()
+    return {
+        "doi": n.doi,
+        "arxiv_id": n.arxiv_id,
+        "title": n.title,
+        "author": n.author,
+        "venue": n.venue,
+        "year": n.year,
+        "pdf": str(n.pdf) if n.pdf else None,
+    }
+
+
+def _query_from_json(name: str, data: dict[str, Any]) -> SeedQuery:
+    pdf = data.get("pdf")
+    year = data.get("year")
+    if isinstance(year, str) and year.isdigit():
+        year = int(year)
+    if not isinstance(year, int):
+        year = None
+    return SeedQuery(
+        doi=data.get("doi") if isinstance(data.get("doi"), str) else None,
+        arxiv_id=data.get("arxiv_id") or data.get("arxiv"),
+        title=data.get("title") if isinstance(data.get("title"), str) else None,
+        author=data.get("author") if isinstance(data.get("author"), str) else None,
+        venue=data.get("venue") if isinstance(data.get("venue"), str) else None,
+        year=year,
+        pdf=Path(pdf) if isinstance(pdf, str) and pdf.strip() else None,
+        preset=name,
+    ).normalized()
+
+
+def default_named_seeds() -> dict[str, SeedQuery]:
+    return {"qc4hep": replace(_QC4HEP)}
+
+
+def load_named_seeds() -> dict[str, SeedQuery]:
+    """Built-in qc4hep plus user seeds in named_seeds.json (user file wins on name clash)."""
+    out = default_named_seeds()
+    path = named_seeds_path()
+    if not path.is_file():
+        return out
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return out
+    if not isinstance(raw, dict):
+        return out
+    for name, rec in raw.items():
+        if not isinstance(rec, dict):
+            continue
+        try:
+            key = normalize_seed_name(str(name))
+        except ValueError:
+            continue
+        out[key] = _query_from_json(key, rec)
+    return out
+
+
+def get_named_seed(name: str) -> SeedQuery | None:
+    try:
+        key = normalize_seed_name(name)
+    except ValueError:
+        return None
+    return load_named_seeds().get(key)
+
+
+def save_named_seed(name: str, query: SeedQuery) -> str:
+    """Write one named seed to config. Returns the normalized name (corpus folder slug)."""
+    key = normalize_seed_name(name)
+    q = query.normalized()
+    if not (q.doi or q.arxiv_id or q.title):
+        raise ValueError("A named seed needs a DOI, arXiv id, or title.")
+    q = replace(q, preset=key)
+    path = named_seeds_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stored: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            stored = loaded
+    stored[key] = _query_to_json(q)
+    path.write_text(json.dumps(stored, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return key
 
 
 def query_from_pdf(path: Path) -> SeedQuery:
@@ -124,9 +231,16 @@ def query_from_pdf(path: Path) -> SeedQuery:
 def query_from_args(args: Any) -> SeedQuery:
     preset = getattr(args, "preset", None)
     if preset:
-        if preset not in PRESETS:
-            raise SystemExit(f"Unknown preset {preset!r}. Known: {', '.join(sorted(PRESETS))}")
-        base = PRESETS[preset]
+        known = load_named_seeds()
+        key = None
+        try:
+            key = normalize_seed_name(preset)
+        except ValueError:
+            key = None
+        base = known.get(key) if key else None
+        if base is None:
+            names = ", ".join(sorted(known)) or "(none)"
+            raise SystemExit(f"Unknown named seed {preset!r}. Known: {names}")
         return replace(
             base,
             doi=getattr(args, "doi", None) or base.doi,
@@ -136,7 +250,7 @@ def query_from_args(args: Any) -> SeedQuery:
             venue=getattr(args, "venue", None) or base.venue,
             year=getattr(args, "year", None) or base.year,
             pdf=getattr(args, "pdf", None) or base.pdf,
-            preset=preset,
+            preset=key,
         ).normalized()
     q = SeedQuery(
         doi=getattr(args, "doi", None),
@@ -149,7 +263,7 @@ def query_from_args(args: Any) -> SeedQuery:
     ).normalized()
     if not (q.doi or q.arxiv_id or q.title):
         raise SystemExit(
-            "Provide a seed paper: --doi, --arxiv, --title [--author], or --preset qc4hep"
+            "Provide a seed paper: --doi, --arxiv, --title [--author], or --preset NAME"
         )
     return q
 

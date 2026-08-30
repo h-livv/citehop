@@ -62,23 +62,31 @@ class StorageBanner(QFrame):
 
 
 class Kpi(QFrame):
-    def __init__(self, label: str, parent=None) -> None:
+    def __init__(self, title: str, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(2)
+        self.title_lbl = QLabel(title)
+        self.title_lbl.setObjectName("kpiTitle")
+        self.title_lbl.setWordWrap(True)
         self.value_lbl = QLabel("—")
         self.value_lbl.setObjectName("kpiValue")
-        self.meta = QLabel(label)
+        self.meta = QLabel("")
         self.meta.setObjectName("muted")
+        self.meta.setWordWrap(True)
+        self.meta.hide()
+        layout.addWidget(self.title_lbl)
         layout.addWidget(self.value_lbl)
         layout.addWidget(self.meta)
 
-    def set_value(self, value: str, meta: str | None = None) -> None:
+    def set_value(self, value: str, extra: str | None = None) -> None:
         self.value_lbl.setText(value)
-        if meta is not None:
-            self.meta.setText(meta)
+        if extra is not None:
+            self.meta.setText(extra)
+            self.meta.setVisible(bool(str(extra).strip()))
 
 
 class DropZone(QFrame):

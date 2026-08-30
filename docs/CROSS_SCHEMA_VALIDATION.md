@@ -1,5 +1,8 @@
 # Cross-schema validation (Phase 2, Step 5)
 
+Still true as of 2026-08-30: the engine has no domain-specific Python branches.
+Starter templates and how to clone them: [USAGE.md](USAGE.md).
+
 The same extraction engine (`citehop.claims.engine`) was run against two projects
 whose schemas share no claim types:
 

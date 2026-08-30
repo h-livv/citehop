@@ -6,7 +6,6 @@ The desktop UI and CLI call only this module — never engine internals.
 from __future__ import annotations
 
 import json
-import os
 import threading
 from collections import Counter
 from datetime import datetime, timezone
@@ -29,11 +28,109 @@ from .llm import (
     LLMError,
     abort_generation,
     clear_generation_abort,
+    llm_env_choice,
+    reject_nonlocal_llm,
     select_backend,
 )
 from .projects import ProjectError, ProjectStore, require_schema_for_run
 from .schema import SchemaError, fields_for_type, list_templates, type_ids
 from .store import ClaimStore, VERIFICATION, extract_lease_seconds
+
+
+def _parse_iso(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def text_file_newer_than(corpus_dir: Path, fid: str, updated_at: str | None) -> bool:
+    path = Path(corpus_dir) / "text" / f"{fid}.txt"
+    if not path.is_file():
+        return False
+    done_at = _parse_iso(updated_at)
+    if done_at is None:
+        return False
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return mtime > done_at
+
+
+def fetch_open_warning(corpus_dir: Path) -> str | None:
+    from citehop.store import Manifest
+
+    db = Path(corpus_dir) / "manifest.db"
+    if not db.is_file():
+        return None
+    man = Manifest(db)
+    try:
+        n = len(man.papers_needing_fetch())
+    finally:
+        man.close()
+    if not n:
+        return None
+    return (
+        f"Corpus still has {n} papers pending fetch or retry. "
+        "Extraction will use whatever text is on disk now (often abstracts)."
+    )
+
+
+def coverage_snapshot(
+    corpus_dir: Path,
+    store: ClaimStore | None,
+    run_id: str | None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    corpus_dir = Path(corpus_dir)
+    db = corpus_dir / "manifest.db"
+    papers_by_id: dict[str, Any] = {}
+    corpus_ids: set[str] = set()
+    if db.is_file():
+        from citehop.store import Manifest
+
+        man = Manifest(db)
+        try:
+            rel = man.counts_by_relation()
+            st = man.counts_by_status()
+            out["papers"] = sum(rel.values())
+            out["backward_ingested"] = rel.get("backward_reference", 0)
+            out["forward_ingested"] = rel.get("forward_citation", 0)
+            out["s2_reference_count_reported"] = man.get_meta("s2_reference_count_reported")
+            out["s2_citation_count_reported"] = man.get_meta("s2_citation_count_reported")
+            out["openalex_referenced_works_count"] = man.get_meta(
+                "openalex_referenced_works_count"
+            )
+            out["openalex_cited_by_count"] = man.get_meta("openalex_cited_by_count")
+            out["fetch_open"] = int(st.get("pending", 0) or 0) + int(
+                st.get("failed_retry", 0) or 0
+            )
+            for row in man.all_papers():
+                papers_by_id[row["canonical_id"]] = row
+                corpus_ids.add(row["canonical_id"])
+        finally:
+            man.close()
+    if store is not None and run_id:
+        run_ids = {
+            r["paper_canonical_id"]
+            for r in store.conn.execute(
+                "SELECT paper_canonical_id FROM run_papers WHERE run_id=?",
+                (run_id,),
+            )
+        }
+        out["corpus_not_in_run"] = len(corpus_ids - run_ids)
+        newer = 0
+        for row in store.done_paper_rows(run_id):
+            cid = row["paper_canonical_id"]
+            src = papers_by_id.get(cid)
+            fid = (src["file_id"] if src else None) or row["file_id"] or file_id(cid)
+            if text_file_newer_than(corpus_dir, fid, row["updated_at"]):
+                newer += 1
+        out["done_text_newer"] = newer
+    return out
 
 
 class ClaimsAPI:
@@ -127,6 +224,17 @@ class ClaimsAPI:
         self.projects.get_project(project_id)
         return ClaimStore(self.projects.db_path(project_id))
 
+    def _decorate_status(
+        self,
+        project: dict[str, Any],
+        store: ClaimStore | None,
+        status: dict[str, Any],
+    ) -> dict[str, Any]:
+        status["coverage"] = coverage_snapshot(
+            Path(project["corpus_dir"]), store, status.get("run_id")
+        )
+        return status
+
     def start_run(self, project_id: str) -> dict[str, Any]:
         """Start a new extraction run.
 
@@ -166,7 +274,10 @@ class ClaimsAPI:
             )
             status = store.run_status_dict(run_id)
             assert status is not None
-            return status
+            warning = fetch_open_warning(Path(project["corpus_dir"]))
+            if warning:
+                status["warning"] = warning
+            return self._decorate_status(project, store, status)
         finally:
             store.close()
 
@@ -216,6 +327,14 @@ class ClaimsAPI:
                 if load_paper_text(corpus_dir, paper):
                     ready.append(cid)
             store.requeue_skipped(run["run_id"], ready)
+            stale: list[str] = []
+            for row in store.done_paper_rows(run["run_id"]):
+                cid = row["paper_canonical_id"]
+                paper = papers_by_id.get(cid) or {}
+                fid = paper.get("file_id") or row["file_id"] or file_id(cid)
+                if text_file_newer_than(corpus_dir, fid, row["updated_at"]):
+                    stale.append(cid)
+            n_stale = store.requeue_done_stale_text(run["run_id"], stale)
             remaining = store.next_pending_paper(run["run_id"])
             used = int(run["tokens_used"])
             budget = int(project.get("token_budget") or run["token_budget"])
@@ -227,7 +346,9 @@ class ClaimsAPI:
                 store.set_run_status(run["run_id"], "running")
             status = store.run_status_dict(run["run_id"])
             assert status is not None
-            return status
+            if n_stale:
+                status["requeued_stale_text"] = n_stale
+            return self._decorate_status(project, store, status)
         finally:
             store.close()
 
@@ -236,7 +357,7 @@ class ClaimsAPI:
         try:
             run = store.latest_run(project_id)
             if not run:
-                return {
+                idle = {
                     "project_id": project_id,
                     "status": "idle",
                     "papers_total": 0,
@@ -248,9 +369,12 @@ class ClaimsAPI:
                     "run_id": None,
                     "error": None,
                 }
+                return self._decorate_status(
+                    self.projects.get_project(project_id), None, idle
+                )
             status = store.run_status_dict(run["run_id"])
             assert status is not None
-            return status
+            return self._decorate_status(self.projects.get_project(project_id), store, status)
         finally:
             store.close()
 
@@ -541,9 +665,32 @@ class ClaimsAPI:
             "run_id": rid,
         }
 
+    def export_evidence_table(
+        self,
+        project_id: str,
+        dest: Path,
+        *,
+        verification_status: str = "human_confirmed",
+    ) -> dict[str, Any]:
+        """Write a markdown table of claims. Default: human_confirmed only."""
+        from .evidence import to_markdown
+
+        self.projects.get_project(project_id)
+        claims = self.list_claims(
+            project_id, verification_status=verification_status or None
+        )
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(to_markdown(claims), encoding="utf-8")
+        return {
+            "path": str(dest),
+            "claim_count": len(claims),
+            "verification_status": verification_status or None,
+        }
+
     def _run_identity(self, project_id: str) -> dict[str, str | None]:
         schema = self.get_schema(project_id)
-        env = (os.environ.get("CITEHOP_LLM") or "").strip().lower()
+        env = llm_env_choice()
         if env in ("fixture", "grounded", "test"):
             return {
                 "llm_backend": "fixture",
@@ -602,7 +749,8 @@ def _time_budget_exceeded(run: Any) -> bool:
 
 def _ready_llm():
     """Resolve the configured backend and make sure it is loaded for extraction."""
-    choice = (os.environ.get("CITEHOP_LLM") or "").strip().lower()
+    choice = llm_env_choice()
+    reject_nonlocal_llm(choice)
     if choice not in ("fixture", "grounded", "test"):
         from citehop.models import prepare_extraction
 

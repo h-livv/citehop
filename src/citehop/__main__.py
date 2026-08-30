@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .config import CORPORA_DIR
 from .pipeline import BuildPaused, CorpusBuilder
-from .seed import PRESETS, query_from_args
+from .seed import query_from_args
 
 
 def _add_seed_args(parser: argparse.ArgumentParser) -> None:
@@ -19,8 +19,11 @@ def _add_seed_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pdf", type=Path, help="Optional local PDF of the seed paper")
     parser.add_argument(
         "--preset",
-        choices=sorted(PRESETS),
-        help="Named seed. qc4hep is the Di Meglio et al. PRX Quantum 2024 review.",
+        metavar="NAME",
+        help=(
+            "Named seed from ~/.config/citehop/named_seeds.json "
+            "(qc4hep is built in). Folder slug is the name."
+        ),
     )
     parser.add_argument(
         "--corpus-dir",

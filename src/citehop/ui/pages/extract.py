@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
-from PySide6.QtCore import QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -23,6 +25,7 @@ from citehop.claims.api import (
     LLMError,
     ProjectError,
     SchemaError,
+    fetch_open_warning,
 )
 from citehop.ui.pages import Page
 from citehop.ui.widgets import Kpi, StorageBanner, card, muted
@@ -68,24 +71,28 @@ class ExtractPage(Page):
         self.model_lbl = muted("")
         kpis = QGridLayout()
         kpis.setSpacing(10)
-        self.kpi_papers = Kpi("Papers")
+        self.kpi_papers = Kpi("Papers in this run")
         self.kpi_tokens = Kpi("Tokens")
         self.kpi_eta = Kpi("ETA")
         self.kpi_status = Kpi("Status")
         for i, w in enumerate((self.kpi_papers, self.kpi_tokens, self.kpi_eta, self.kpi_status)):
             kpis.addWidget(w, 0, i)
+        self.coverage_lbl = muted("")
 
         self.start_btn = QPushButton("Start extraction")
         self.start_btn.setObjectName("accent")
         self.pause_btn = QPushButton("Pause")
         self.resume_btn = QPushButton("Resume")
+        self.open_export_btn = QPushButton("Open exports")
         self.start_btn.clicked.connect(self._start)
         self.pause_btn.clicked.connect(self._pause)
         self.resume_btn.clicked.connect(self._resume)
+        self.open_export_btn.clicked.connect(self._open_exports)
         btns = QHBoxLayout()
         btns.addWidget(self.start_btn)
         btns.addWidget(self.pause_btn)
         btns.addWidget(self.resume_btn)
+        btns.addWidget(self.open_export_btn)
         btns.addStretch()
         btn_w = QWidget()
         btn_w.setLayout(btns)
@@ -97,6 +104,7 @@ class ExtractPage(Page):
         root.addWidget(self.project_lbl)
         root.addWidget(self.model_lbl)
         root.addLayout(kpis)
+        root.addWidget(self.coverage_lbl)
         root.addWidget(
             card(
                 btn_w,
@@ -186,11 +194,14 @@ class ExtractPage(Page):
         used = int(status.get("tokens_used") or 0)
         budget = int(status.get("token_budget") or 0)
         st = status.get("status") or "idle"
-        self.kpi_papers.set_value(f"{done + skipped} / {total}", "processed / total")
+        self.kpi_papers.set_value(f"{done + skipped} / {total}", "done or skipped / queued")
         n_claims = int(status.get("claims_count") or status.get("claim_count") or 0)
         self.kpi_tokens.set_value(f"{used:,} / {budget:,}", "used / budget")
         self.kpi_status.set_value(st, f"{n_claims} claims")
         self.kpi_eta.set_value(_eta(status))
+        cov = status.get("coverage")
+        if isinstance(cov, dict):
+            self.coverage_lbl.setText(_coverage_line(cov))
         running = bool(self._worker and self._worker.isRunning())
         self.start_btn.setEnabled(
             bool(self._project_id) and st in ("idle", "completed", "failed") and not running
@@ -210,12 +221,29 @@ class ExtractPage(Page):
             QMessageBox.information(self, "Extract", "Select a project first.")
             return
         try:
+            proj = self.api.get_project(self._project_id)
+            warn = fetch_open_warning(Path(proj["corpus_dir"]))
+        except (ProjectError, OSError) as exc:
+            QMessageBox.warning(self, "Extract", str(exc))
+            return
+        if warn:
+            go = QMessageBox.question(
+                self,
+                "Fetch still open",
+                f"{warn}\n\nExtract anyway? Papers without a PDF will use abstracts.",
+            )
+            if go != QMessageBox.StandardButton.Yes:
+                return
+        try:
             status = self.api.start_run(self._project_id)
         except (ExtractionError, LLMError, SchemaError, ProjectError) as exc:
             QMessageBox.warning(self, "Extract", str(exc))
             self.log.appendPlainText(str(exc))
             return
         self.log.appendPlainText(f"Started run {status.get('run_id')}")
+        extra = status.get("warning")
+        if extra:
+            self.log.appendPlainText(str(extra))
         self._apply_status(status)
         self._spawn_worker()
 
@@ -244,10 +272,29 @@ class ExtractPage(Page):
         except (ExtractionError, LLMError, SchemaError, ProjectError) as exc:
             QMessageBox.warning(self, "Extract", str(exc))
             return
-        self.log.appendPlainText("Resumed.")
+        n_stale = status.get("requeued_stale_text") or 0
+        if n_stale:
+            self.log.appendPlainText(
+                f"Resumed. Requeued {n_stale} papers whose text file is newer than extract."
+            )
+        else:
+            self.log.appendPlainText("Resumed.")
         self._apply_status(status)
         if status.get("status") == "running":
             self._spawn_worker()
+
+    def _open_exports(self) -> None:
+        if not self._project_id:
+            QMessageBox.information(self, "Extract", "Select a project first.")
+            return
+        try:
+            proj = self.api.get_project(self._project_id)
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Extract", str(exc))
+            return
+        folder = Path(proj["project_dir"]) / "exports"
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _spawn_worker(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -271,12 +318,13 @@ class ExtractPage(Page):
                 f"{status.get('status')}  papers {done}/{total}  tokens {status.get('tokens_used')}"
             )
             if status.get("status") == "completed":
-                claims_dir = status.get("claims_dir")
                 n = status.get("claim_count") or status.get("claims_count")
-                if claims_dir:
-                    self.log.appendPlainText(
-                        f"Claims JSON: {n} files in {claims_dir}"
-                    )
+                export_path = status.get("export_path")
+                claims_dir = status.get("claims_dir")
+                if export_path:
+                    self.log.appendPlainText(f"Handoff JSON: {export_path}")
+                elif claims_dir:
+                    self.log.appendPlainText(f"Claims JSON: {n} files in {claims_dir}")
 
     @Slot(str)
     def _on_fail(self, message: str) -> None:
@@ -293,6 +341,36 @@ class ExtractPage(Page):
     def _on_worker_finished(self) -> None:
         self._worker = None
         self._refresh_status()
+
+
+def _coverage_line(cov: dict) -> str:
+    parts: list[str] = []
+    back = cov.get("backward_ingested")
+    fwd = cov.get("forward_ingested")
+    if back is not None:
+        parts.append(f"{back} cited by seed in corpus")
+    if fwd is not None:
+        parts.append(f"{fwd} citing the seed in corpus")
+    s2_back = cov.get("s2_reference_count_reported")
+    s2_fwd = cov.get("s2_citation_count_reported")
+    oa_back = cov.get("openalex_referenced_works_count")
+    oa_fwd = cov.get("openalex_cited_by_count")
+    if s2_back or s2_fwd:
+        parts.append(f"S2 listed {s2_back or '—'} refs · {s2_fwd or '—'} citations at resolve")
+    if oa_back or oa_fwd:
+        parts.append(
+            f"OpenAlex listed {oa_back or '—'} referenced works · {oa_fwd or '—'} citations at resolve"
+        )
+    fetch_open = int(cov.get("fetch_open") or 0)
+    if fetch_open:
+        parts.append(f"fetch still open: {fetch_open} pending or retry")
+    missing = int(cov.get("corpus_not_in_run") or 0)
+    if missing:
+        parts.append(f"{missing} corpus papers not in this run")
+    newer = int(cov.get("done_text_newer") or 0)
+    if newer:
+        parts.append(f"{newer} done papers have newer text files")
+    return " · ".join(parts)
 
 
 def _eta(status: dict) -> str:

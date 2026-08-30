@@ -38,11 +38,6 @@ def locate_span(stored_text: str, quote: str) -> tuple[int, int] | None:
         idx = collapsed_hay.find(collapsed_needle)
         if idx >= 0:
             return _map_collapsed_offset(stored_text, idx, len(collapsed_needle))
-    if len(stripped) > 40:
-        head = stripped[:80]
-        exact = stored_text.find(head)
-        if exact >= 0:
-            return exact, exact + len(head)
     return None
 
 

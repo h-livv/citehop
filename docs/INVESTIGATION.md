@@ -1,6 +1,14 @@
 # Investigation log — qc4hep extraction close-out
 
-Continued 2026-08-30. This file is evidence for the v1.0 close-out, not a redesign brief.
+Continued 2026-08-30. This file is a **frozen evidence log** for the v1.0
+close-out, not a redesign brief and not a description of later engine changes.
+
+Later the same day (documented in [USAGE.md](USAGE.md) and
+[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)): `locate_span` dropped the
+80-character prefix fallback; resume requeues `done` papers when `text/*.txt`
+is newer; Analyze/Extract show provider-reported counts and fetch-open
+warnings. The **23-claim / 203-paper numbers below are still what that run
+produced.** They were not re-measured after those fixes.
 
 Data sources unless noted: `/run/media/h-livv/Vault/CiteHop/_projects/qc4hep/extraction.db`, `schema.json`, `project.json`; corpus `/run/media/h-livv/Vault/CiteHop/qc4hep/`; `~/.config/citehop/model.json`; git log in `/home/h-livv/opt/citehop`.
 

@@ -30,7 +30,7 @@ from citehop import icon_path
 from citehop.catalog import CorpusSummary, summarize_corpus
 from citehop.config import CORPORA_DIR
 from citehop.pipeline import BuildPaused, CorpusBuilder
-from citehop.seed import PRESETS, SeedQuery
+from citehop.seed import SeedQuery, get_named_seed
 from citehop.ui.pages.analyze import AnalyzePage
 from citehop.ui.pages.corpus import CorpusPage
 from citehop.ui.pages.extract import ExtractPage
@@ -79,9 +79,18 @@ class BuildWorker(QThread):
             self._builder = builder
             if self._stop.is_set():
                 builder.pause()
-            builder.run()
+            if self.payload.get("mode") == "fetch_pdfs":
+                builder.fetch_full_texts()
+            else:
+                builder.run()
             self.progress.emit(builder.snapshot_counts())
-            self.finished_ok.emit({"ok": True, "corpus_dir": str(builder.corpus_dir)})
+            self.finished_ok.emit(
+                {
+                    "ok": True,
+                    "corpus_dir": str(builder.corpus_dir),
+                    "mode": self.payload.get("mode"),
+                }
+            )
         except BuildPaused:
             path = str(builder.corpus_dir) if builder else ""
             if builder is not None:
@@ -89,7 +98,14 @@ class BuildWorker(QThread):
                     self.progress.emit(builder.snapshot_counts())
                 except Exception:
                     pass
-            self.finished_ok.emit({"ok": True, "paused": True, "corpus_dir": path})
+            self.finished_ok.emit(
+                {
+                    "ok": True,
+                    "paused": True,
+                    "corpus_dir": path,
+                    "mode": self.payload.get("mode"),
+                }
+            )
         except SystemExit as exc:
             msg = exc.code if isinstance(exc.code, str) else (str(exc) or "Stopped")
             self.finished_ok.emit({"ok": False, "error": msg})
@@ -113,19 +129,20 @@ def _seed_from_payload(payload: dict[str, Any]) -> SeedQuery:
         pdf=pdf,
         preset=payload.get("preset"),
     ).normalized()
-    if seed.preset and seed.preset in PRESETS:
-        base = PRESETS[seed.preset]
-        seed = replace(
-            base,
-            doi=seed.doi or base.doi,
-            arxiv_id=seed.arxiv_id or base.arxiv_id,
-            title=seed.title or base.title,
-            author=seed.author or base.author,
-            venue=seed.venue or base.venue,
-            year=seed.year or base.year,
-            pdf=seed.pdf or base.pdf,
-            preset=seed.preset,
-        ).normalized()
+    if seed.preset:
+        base = get_named_seed(seed.preset)
+        if base:
+            seed = replace(
+                base,
+                doi=seed.doi or base.doi,
+                arxiv_id=seed.arxiv_id or base.arxiv_id,
+                title=seed.title or base.title,
+                author=seed.author or base.author,
+                venue=seed.venue or base.venue,
+                year=seed.year or base.year,
+                pdf=seed.pdf or base.pdf,
+                preset=seed.preset,
+            ).normalized()
     return seed
 
 
@@ -135,6 +152,14 @@ def _make_builder(
     stop: threading.Event,
     progress=None,  # noqa: ANN001
 ) -> CorpusBuilder:
+    if payload.get("mode") == "fetch_pdfs":
+        corpus_dir = Path(payload["corpus_dir"]).expanduser()
+        if not (corpus_dir / "manifest.db").is_file():
+            raise SystemExit(f"No manifest.db in {corpus_dir}")
+        log(f"Fetching remaining OA/arXiv PDFs in {corpus_dir}")
+        return CorpusBuilder(
+            corpus_dir, log=log, stop=stop, progress=progress, write_readme=False
+        )
     seed = _seed_from_payload(payload)
     if not (seed.doi or seed.arxiv_id or seed.title or seed.preset):
         raise SystemExit("Provide a PDF with identifiers, or a DOI / arXiv id / title.")
@@ -216,6 +241,9 @@ class MainWindow(QMainWindow):
             self.nav_group.addButton(btn, i)
             side.addWidget(btn)
             if isinstance(page, AnalyzePage):
+                page.start_requested.connect(self.start_analysis)
+                page.pause_requested.connect(self.pause_analysis)
+            if isinstance(page, CorpusPage):
                 page.start_requested.connect(self.start_analysis)
                 page.pause_requested.connect(self.pause_analysis)
             page.project_changed.connect(self._set_project)
@@ -327,16 +355,37 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             QMessageBox.information(self, "Busy", "An analysis is already running.")
             return
-        self._run_dir = _seed_from_payload(payload).default_corpus_dir()
+        fetch_only = payload.get("mode") == "fetch_pdfs"
+        if fetch_only:
+            corpus_dir = Path(payload["corpus_dir"]).expanduser()
+            if not (corpus_dir / "manifest.db").is_file():
+                QMessageBox.warning(self, "Corpus", f"No manifest.db in {corpus_dir}")
+                return
+            self._run_dir = corpus_dir
+            self._analyze().append_log(f"Fetching remaining PDFs in {corpus_dir}")
+            self.pill_mode_lbl.setText("Mode  fetch PDFs")
+            self._set_banner(
+                "Fetching remaining OA/arXiv PDFs. Pause on Corpus or Analyze to stop.",
+                "ok",
+            )
+        else:
+            self._run_dir = _seed_from_payload(payload).default_corpus_dir()
+            self._analyze().append_log("Starting analysis…")
+            self.pill_mode_lbl.setText(f"Mode  {payload.get('mode', 'sample')}")
+            self._set_banner(
+                "Analysis running. You can switch to Corpus to watch papers appear.",
+                "ok",
+            )
         self._analyze().set_run_state("running")
-        self._analyze().append_log("Starting analysis…")
-        self.pill_mode_lbl.setText(f"Mode  {payload.get('mode', 'sample')}")
+        self._corpus().set_pipeline_busy(True)
         self.pill_run_lbl.setText("Run  in progress")
-        self.side_status.setText("Fetching 1-hop corpus…")
-        self._set_banner("Analysis running. You can switch to Corpus to watch papers appear.", "ok")
+        self.side_status.setText(
+            "Fetching remaining PDFs…" if fetch_only else "Fetching 1-hop corpus…"
+        )
         worker = BuildWorker(payload)
         self._worker = worker
         worker.log.connect(self._analyze().append_log)
+        worker.log.connect(self._corpus().set_fetch_line)
         worker.progress.connect(self._on_progress)
         worker.finished_ok.connect(self._on_done)
         worker.start()
@@ -352,13 +401,25 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_done(self, result: object) -> None:
         self.poll.stop()
+        self._corpus().set_pipeline_busy(False)
         payload = result if isinstance(result, dict) else {"ok": False, "error": str(result)}
+        fetch_only = payload.get("mode") == "fetch_pdfs"
         corpus_dir = str(payload.get("corpus_dir") or "")
         if corpus_dir:
             self._run_dir = Path(corpus_dir)
             self._poll_run()
             self._corpus().reload_corpora(select_path=corpus_dir)
         if payload.get("paused"):
+            if fetch_only:
+                self._analyze().set_run_state("idle")
+                msg = "PDF fetch paused. Click Fetch remaining PDFs on Corpus to continue."
+                self._analyze().append_log(msg)
+                self._corpus().set_fetch_line(msg)
+                self.pill_run_lbl.setText("Run  paused")
+                self.side_status.setText("Paused")
+                self._set_banner(msg, "ok")
+                self.statusBar().showMessage(f"Paused  ·  {corpus_dir}")
+                return
             self._analyze().set_run_state("paused")
             self._analyze().append_log(
                 "Paused. Nothing is lost — resume or Start analysis with the same seed to continue."
@@ -383,6 +444,13 @@ class MainWindow(QMainWindow):
             return
         self.pill_run_lbl.setText("Run  complete")
         self.side_status.setText("Idle")
+        if fetch_only:
+            msg = f"PDF fetch finished. Files are in {corpus_dir}/raw/."
+            self._analyze().append_log(msg)
+            self._corpus().set_fetch_line(msg)
+            self._set_banner(msg, "ok")
+            self.statusBar().showMessage(f"Complete  ·  {corpus_dir}")
+            return
         self._set_banner(
             f"Finished. Corpus is in {corpus_dir} (metadata + OA PDFs in raw/). "
             "Next: Models → Projects → Schema → Extract.",
@@ -407,13 +475,6 @@ class MainWindow(QMainWindow):
     def _apply_live_summary(self, summary) -> None:  # noqa: ANN001
         self._analyze().apply_summary(summary)
         self._corpus().apply_summary(summary)
-        if not summary:
-            return
-        ok = summary.success_count
-        self.side_status.setText(
-            f"{ok}/{summary.paper_count} processed  ·  {summary.pdf_count} PDFs"
-        )
-        self.pill_run_lbl.setText(f"Run  {ok} processed")
 
     def _poll_run(self) -> None:
         path = self._run_dir

@@ -1,4 +1,4 @@
-"""LLM backends for extraction. No domain vocabulary; prompts are opaque strings."""
+"""LLM backends for extraction: local Ollama and FreeToken only. No cloud LLM APIs."""
 
 from __future__ import annotations
 
@@ -529,17 +529,39 @@ class LLMBackend(Protocol):
         """Return (response_text, token_count_estimate)."""
 
 
+_LOCAL_LLM_ENV = frozenset({"", "ollama", "freetoken", "fixture", "grounded", "test"})
+
+
+def llm_env_choice() -> str:
+    return (os.environ.get("CITEHOP_LLM") or "").strip().lower()
+
+
+def reject_nonlocal_llm(choice: str | None = None) -> None:
+    """Cloud LLM APIs are not a backend. Extraction is Ollama or FreeToken only."""
+    value = llm_env_choice() if choice is None else choice
+    if value in _LOCAL_LLM_ENV:
+        return
+    raise LLMError(
+        f"CITEHOP_LLM={value!r} is not supported. Extraction uses only local "
+        "Ollama or FreeToken models (pick one on the Models tab)."
+    )
+
+
 def select_backend() -> LLMBackend:
-    choice = (os.environ.get("CITEHOP_LLM") or "").strip().lower()
+    choice = llm_env_choice()
+    reject_nonlocal_llm(choice)
     if choice in ("fixture", "grounded", "test"):
         return GroundedFixtureLLM()
-    if choice in ("gemini", "google"):
-        return GeminiLLM()
 
     from citehop.models import load_settings
 
     settings = load_settings()
     backend = (settings or {}).get("backend") if choice in ("", None) else choice
+    if backend and backend not in ("freetoken", "ollama"):
+        raise LLMError(
+            f"Backend {backend!r} is not supported. Extraction uses only local "
+            "Ollama or FreeToken models (pick one on the Models tab)."
+        )
     if backend == "freetoken":
         if not settings or settings.get("backend") != "freetoken":
             raise LLMError("Select a FreeToken model on the Models tab.")
@@ -773,53 +795,6 @@ class FreeTokenLLM:
                 f"FreeToken is not reachable: {exc}. "
                 "Load the model on the Models tab, then resume extraction."
             ) from exc
-
-
-class GeminiLLM:
-    name = "gemini"
-
-    def __init__(self) -> None:
-        self.key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
-        if not self.key:
-            raise LLMError("GEMINI_API_KEY / GOOGLE_API_KEY is not set")
-        self.model = os.environ.get("CITEHOP_GEMINI_MODEL", "gemini-2.0-flash")
-
-    def complete(
-        self, prompt: str, should_stop: Callable[[], bool] | None = None
-    ) -> tuple[str, int]:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent"
-        )
-        try:
-            with _cancellable_request(
-                "POST",
-                url,
-                should_stop=should_stop,
-                timeout=(10, 180),
-                params={"key": self.key},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-            ) as r:
-                if r.status_code >= 500 or r.status_code in (404, 408, 429):
-                    raise BackendUnavailable(f"Gemini HTTP {r.status_code}: {r.text[:400]}")
-                if r.status_code >= 400:
-                    raise LLMError(f"Gemini HTTP {r.status_code}: {r.text[:400]}")
-                data = r.json()
-        except GenerationCancelled:
-            raise
-        except BackendUnavailable:
-            raise
-        except LLMError:
-            raise
-        except requests.RequestException as exc:
-            raise BackendUnavailable(f"Gemini is not reachable: {exc}") from exc
-        parts = (
-            ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
-        )
-        text = "".join(p.get("text") or "" for p in parts)
-        usage = data.get("usageMetadata") or {}
-        tokens = int(usage.get("totalTokenCount") or 0) or max(1, (len(prompt) + len(text)) // 4)
-        return text, tokens
 
 
 def _ollama_client_error(status: int, body: str) -> LLMError:

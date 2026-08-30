@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -21,7 +21,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from citehop.catalog import CorpusSummary, list_corpora, load_papers
+from citehop.catalog import (
+    CorpusSummary,
+    coverage_caption,
+    hop_counts,
+    list_corpora,
+    load_papers,
+    pdf_over_cited_citing,
+)
 from citehop.config import CORPORA_DIR
 from citehop.ui.pages import Page
 from citehop.ui.widgets import Kpi, card, muted
@@ -31,10 +38,13 @@ COLUMNS = ("Title", "Year", "Relation", "Status", "DOI", "arXiv", "Full text")
 
 
 class CorpusPage(Page):
+    pause_requested = Signal()
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._papers: list[dict] = []
         self._current_path: Path | None = None
+        self._pipeline_busy = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -49,28 +59,42 @@ class CorpusPage(Page):
         refresh.clicked.connect(self.reload_corpora)
         self.open_folder = QPushButton("Open folder")
         self.open_folder.clicked.connect(self._open_folder)
+        self.fetch_pdfs = QPushButton("Fetch remaining PDFs")
+        self.fetch_pdfs.clicked.connect(self._fetch_pdfs)
+        self.pause_fetch = QPushButton("Pause fetch")
+        self.pause_fetch.setEnabled(False)
+        self.pause_fetch.clicked.connect(self.pause_requested.emit)
         pick.addWidget(self.selector, 1)
         pick.addWidget(refresh)
         pick.addWidget(self.open_folder)
+        pick.addWidget(self.fetch_pdfs)
+        pick.addWidget(self.pause_fetch)
         pick_wrap = QWidget()
         pick_wrap.setLayout(pick)
         root.addWidget(
             card(
                 pick_wrap,
-                muted(f"Stored in {CORPORA_DIR}. Each corpus is one seed plus the papers it cites and the papers that cite it."),
+                muted(
+                    f"Stored in {CORPORA_DIR}. Each corpus is one seed plus the papers it cites "
+                    "and the papers that cite it. Fetch remaining PDFs retries OA/arXiv copies."
+                ),
                 title="Corpora",
             )
         )
 
         kpis = QGridLayout()
         kpis.setSpacing(10)
-        self.kpi_papers = Kpi("Papers")
         self.kpi_back = Kpi("Cited by seed")
-        self.kpi_fwd = Kpi("Cites seed")
-        self.kpi_text = Kpi("Full text")
-        for i, w in enumerate((self.kpi_papers, self.kpi_back, self.kpi_fwd, self.kpi_text)):
+        self.kpi_fwd = Kpi("Citing the seed")
+        self.kpi_text = Kpi("With full text")
+        self.kpi_pdfs = Kpi("PDFs")
+        for i, w in enumerate((self.kpi_back, self.kpi_fwd, self.kpi_text, self.kpi_pdfs)):
             kpis.addWidget(w, 0, i)
         root.addLayout(kpis)
+        self.coverage_lbl = muted("")
+        root.addWidget(self.coverage_lbl)
+        self.fetch_line = muted("")
+        root.addWidget(self.fetch_line)
 
         filters = QHBoxLayout()
         self.search = QLineEdit()
@@ -164,11 +188,32 @@ class CorpusPage(Page):
         if not path:
             self._set_summary(None)
             self._fill_table([])
+            self._sync_fetch_buttons()
             return
         from citehop.catalog import summarize_corpus
 
         self._set_summary(summarize_corpus(path))
         self._fill_table(load_papers(path))
+        self._sync_fetch_buttons()
+
+    def set_pipeline_busy(self, busy: bool) -> None:
+        self._pipeline_busy = busy
+        self._sync_fetch_buttons()
+
+    def set_fetch_line(self, text: str) -> None:
+        self.fetch_line.setText(text)
+
+    def _sync_fetch_buttons(self) -> None:
+        has = bool(self._current_path and (self._current_path / "manifest.db").is_file())
+        self.fetch_pdfs.setEnabled(has and not self._pipeline_busy)
+        self.pause_fetch.setEnabled(self._pipeline_busy)
+
+    def _fetch_pdfs(self) -> None:
+        if not self._current_path or not (self._current_path / "manifest.db").is_file():
+            return
+        self.start_requested.emit(
+            {"mode": "fetch_pdfs", "corpus_dir": str(self._current_path)}
+        )
 
     def apply_summary(self, summary: CorpusSummary | None) -> None:
         self._set_summary(summary)
@@ -181,15 +226,25 @@ class CorpusPage(Page):
 
     def _set_summary(self, summary: CorpusSummary | None) -> None:
         if not summary:
-            for kpi in (self.kpi_papers, self.kpi_back, self.kpi_fwd, self.kpi_text):
-                kpi.set_value("—")
+            for kpi in (self.kpi_back, self.kpi_fwd, self.kpi_text, self.kpi_pdfs):
+                kpi.set_value("—", "")
+            self.coverage_lbl.setText("")
             return
-        rel = summary.relation_counts
-        self.kpi_papers.set_value(str(summary.paper_count), summary.slug)
-        self.kpi_back.set_value(str(rel.get("backward_reference", 0)), "references")
-        self.kpi_fwd.set_value(str(rel.get("forward_citation", 0)), "citations")
-        successful = summary.success_count
-        self.kpi_text.set_value(str(successful), f"{summary.pdf_count} PDFs")
+        seed, back, fwd, total = hop_counts(summary)
+        self.kpi_back.set_value(str(back), "papers the seed cites")
+        self.kpi_fwd.set_value(str(fwd), "papers that cite the seed")
+        self.kpi_text.set_value(
+            str(summary.success_count),
+            f"of {total} papers in corpus" if total else "extracted text on disk",
+        )
+        pdfs, hop = pdf_over_cited_citing(summary)
+        self.kpi_pdfs.set_value(
+            f"{pdfs} / {hop}" if hop else (str(pdfs) if pdfs else "—"),
+            "files in raw/ of cited + citing",
+        )
+        extra = f"{seed} seed" if seed else ""
+        cap = coverage_caption(summary)
+        self.coverage_lbl.setText(" · ".join(p for p in (extra, cap) if p))
 
     def _fill_table(self, papers: list[dict]) -> None:
         self._papers = papers

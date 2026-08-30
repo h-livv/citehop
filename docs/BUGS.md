@@ -10,6 +10,30 @@ This file records **observed** behavior, **deliberate lifecycle decisions**, and
 bug found. “Pass” means the checklist item was exercised and the behavior is now
 intentional and tested, not that the product is bug-free.
 
+Current commands and UI: [USAGE.md](USAGE.md). Yield caveats:
+[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
+
+## After the hardening pass (same day)
+
+These are later, tested engine/UI changes — not items from the original
+checklist:
+
+1. **`locate_span` no longer uses an 80-character prefix fallback.** Exact /
+   strip / whitespace-collapse only. Test:
+   `HardeningTests.test_locate_span_rejects_unmatched_prefix`. Existing claim
+   rows are not rewritten; `scripts/audit_grounding.py` classifies them.
+2. **`resume_run` requeues `done` papers** whose `text/<file_id>.txt` is newer
+   than extract, and deletes that run’s claims for them. `start_run` warns
+   (does not refuse) when fetch is still open. Tests:
+   `test_resume_requeues_done_when_text_file_newer`,
+   `test_start_run_warns_when_fetch_still_open`.
+3. **UI coverage:** Analyze/Corpus KPIs are cited-by-seed, citing-the-seed, and
+   with-full-text. Provider lists at resolve sit on the coverage line. Review
+   copy says match is two samples of the same model, not a validity check.
+4. **Read-only scripts:** `audit_corpus.py`, `audit_grounding.py`,
+   `audit_extract_drift.py`, plus `evidence_table.py` for confirmed-claim
+   markdown.
+
 ## Lifecycle decisions (were undefined; now explicit)
 
 1. **Zero-field claim types are allowed.** `structured_fields: []` is valid. The type

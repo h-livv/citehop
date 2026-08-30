@@ -34,12 +34,60 @@ class CorpusSummary:
     finished_at: str | None
     pdf_count: int = 0
     success_count: int = 0
+    s2_reference_count_reported: str | None = None
+    s2_citation_count_reported: str | None = None
+    openalex_referenced_works_count: str | None = None
+    openalex_cited_by_count: str | None = None
 
     @property
     def label(self) -> str:
         title = self.seed_title or self.slug
         year = f" ({self.year})" if self.year else ""
         return f"{title}{year}"
+
+
+def hop_counts(summary: CorpusSummary) -> tuple[int, int, int, int]:
+    """seed, cited-by-seed, citing-seed, total papers in the corpus."""
+    rel = summary.relation_counts or {}
+    seed = int(rel.get("seed", 0) or 0)
+    back = int(rel.get("backward_reference", 0) or 0)
+    fwd = int(rel.get("forward_citation", 0) or 0)
+    total = int(summary.paper_count or 0)
+    if not total:
+        total = seed + back + fwd
+    return seed, back, fwd, total
+
+
+def pdf_over_cited_citing(summary: CorpusSummary) -> tuple[int, int]:
+    """PDF files in raw/ over cited-by-seed + citing-the-seed (seed excluded)."""
+    _, back, fwd, _ = hop_counts(summary)
+    return int(summary.pdf_count or 0), back + fwd
+
+
+def coverage_caption(summary: CorpusSummary) -> str:
+    """One line: API lists at resolve, fetch still open. Not a fraction."""
+    parts: list[str] = []
+    s2_back = summary.s2_reference_count_reported
+    s2_fwd = summary.s2_citation_count_reported
+    oa_back = summary.openalex_referenced_works_count
+    oa_fwd = summary.openalex_cited_by_count
+
+    def _ok(raw: str | None) -> bool:
+        return raw not in (None, "", "null", "None")
+
+    if _ok(s2_back) or _ok(s2_fwd):
+        parts.append(
+            f"S2 listed {s2_back or '—'} references and {s2_fwd or '—'} citations at resolve"
+        )
+    if _ok(oa_back) or _ok(oa_fwd):
+        parts.append(
+            f"OpenAlex listed {oa_back or '—'} referenced works and {oa_fwd or '—'} citations at resolve"
+        )
+    st = summary.status_counts or {}
+    open_n = int(st.get("pending", 0) or 0) + int(st.get("failed_retry", 0) or 0)
+    if open_n:
+        parts.append(f"fetch still open: {open_n} pending or retry")
+    return " · ".join(parts)
 
 
 def _seed_row(manifest: Manifest):
@@ -84,6 +132,12 @@ def summarize_corpus(corpus_dir: Path) -> CorpusSummary | None:
             finished_at=manifest.get_meta("run_finished_at"),
             pdf_count=pdf_count,
             success_count=manifest.count_successful_fetches(),
+            s2_reference_count_reported=manifest.get_meta("s2_reference_count_reported"),
+            s2_citation_count_reported=manifest.get_meta("s2_citation_count_reported"),
+            openalex_referenced_works_count=manifest.get_meta(
+                "openalex_referenced_works_count"
+            ),
+            openalex_cited_by_count=manifest.get_meta("openalex_cited_by_count"),
         )
     finally:
         manifest.close()

@@ -350,6 +350,62 @@ class ClaimStore:
             self._refresh_run_paper_counts(run_id)
         return n
 
+    def done_paper_rows(self, run_id: str) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT paper_canonical_id, file_id, updated_at FROM run_papers "
+                "WHERE run_id=? AND status='done'",
+                (run_id,),
+            )
+        )
+
+    def requeue_done_stale_text(self, run_id: str, canonical_ids: list[str]) -> int:
+        """Return done papers to pending and drop this run's claims for them.
+
+        Used when stored text is newer than the extract (abstract then PDF).
+        """
+        if not canonical_ids:
+            return 0
+        now = utcnow()
+        claim_ids: list[str] = []
+        n = 0
+        self._begin()
+        try:
+            for cid in canonical_ids:
+                rows = self.conn.execute(
+                    "SELECT claim_id FROM claims WHERE run_id=? AND paper_canonical_id=?",
+                    (run_id, cid),
+                ).fetchall()
+                claim_ids.extend(r["claim_id"] for r in rows)
+                self.conn.execute(
+                    "DELETE FROM claims WHERE run_id=? AND paper_canonical_id=?",
+                    (run_id, cid),
+                )
+                cur = self.conn.execute(
+                    "UPDATE run_papers SET status='pending', error=NULL, tokens_used=0, "
+                    "updated_at=? WHERE run_id=? AND paper_canonical_id=? AND status='done'",
+                    (now, run_id, cid),
+                )
+                n += int(cur.rowcount or 0)
+            if n:
+                self._refresh_run_paper_counts(run_id)
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
+        if claim_ids:
+            from .files import claim_file_path, write_claims_index
+
+            folder = self.db_path.parent
+            for cid in claim_ids:
+                path = claim_file_path(folder, cid)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            write_claims_index(folder)
+        return n
+
     def papers_with_status(self, run_id: str, status: str) -> list[str]:
         rows = self.conn.execute(
             "SELECT paper_canonical_id FROM run_papers WHERE run_id=? AND status=?",

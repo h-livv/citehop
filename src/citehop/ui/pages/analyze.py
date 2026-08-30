@@ -6,22 +6,33 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from citehop.catalog import CorpusSummary
+from citehop.catalog import CorpusSummary, coverage_caption, hop_counts, pdf_over_cited_citing
+from citehop.config import CORPORA_DIR
 from citehop.extract import inspect_pdf
-from citehop.seed import PRESETS
+from citehop.seed import (
+    SeedQuery,
+    get_named_seed,
+    load_named_seeds,
+    normalize_seed_name,
+    save_named_seed,
+)
 from citehop.ui.pages import Page
 from citehop.ui.widgets import DropZone, Kpi, card, muted
 
@@ -42,13 +53,15 @@ class AnalyzePage(Page):
 
         kpis = QGridLayout()
         kpis.setSpacing(10)
-        self.kpi_papers = Kpi("Papers")
         self.kpi_back = Kpi("Cited by seed")
-        self.kpi_fwd = Kpi("Cites seed")
-        self.kpi_text = Kpi("Full text")
-        for i, w in enumerate((self.kpi_papers, self.kpi_back, self.kpi_fwd, self.kpi_text)):
+        self.kpi_fwd = Kpi("Citing the seed")
+        self.kpi_text = Kpi("With full text")
+        self.kpi_pdfs = Kpi("PDFs")
+        for i, w in enumerate((self.kpi_back, self.kpi_fwd, self.kpi_text, self.kpi_pdfs)):
             kpis.addWidget(w, 0, i)
         root.addLayout(kpis)
+        self.coverage_lbl = muted("")
+        root.addWidget(self.coverage_lbl)
 
         self.drop = DropZone()
         self.drop.set_handler(self.load_pdf)
@@ -142,8 +155,6 @@ class AnalyzePage(Page):
         self.n_fwd = QSpinBox()
         self.n_fwd.setRange(1, 50)
         self.n_fwd.setValue(5)
-        self.preset_btn = QPushButton("qc4hep")
-        self.preset_btn.clicked.connect(self._load_qc4hep)
         mode_row = QHBoxLayout()
         mode_row.addWidget(self.sample_radio)
         mode_row.addWidget(self.full_radio)
@@ -153,8 +164,24 @@ class AnalyzePage(Page):
         mode_row.addWidget(QLabel("Forward"))
         mode_row.addWidget(self.n_fwd)
         mode_row.addStretch()
-        mode_row.addWidget(muted("Named seed"))
-        mode_row.addWidget(self.preset_btn)
+
+        self.named_combo = QComboBox()
+        self.named_combo.setMinimumHeight(32)
+        self.named_combo.setMinimumWidth(160)
+        self.named_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.named_combo.currentIndexChanged.connect(self._on_named_seed_chosen)
+        self.save_named = QPushButton("Save as…")
+        self.save_named.setToolTip(
+            "Save the current identifiers as a named seed. "
+            "The name is the corpus folder slug."
+        )
+        self.save_named.clicked.connect(self._save_named_seed)
+        named_row = QHBoxLayout()
+        named_row.addWidget(QLabel("Named seed"))
+        named_row.addWidget(self.named_combo, 1)
+        named_row.addWidget(self.save_named)
         self.confirm = QCheckBox("I confirmed the sample looks right — run the full 1-hop corpus")
         self.confirm.hide()
         self.confirm.toggled.connect(self._refresh_start)
@@ -165,9 +192,10 @@ class AnalyzePage(Page):
         mode_l.setSpacing(10)
         mode_l.addWidget(form_wrap)
         mode_l.addLayout(mode_row)
+        mode_l.addLayout(named_row)
         mode_l.addWidget(self.confirm)
         id_card = card(mode_wrap, title="Identifiers and mode")
-        id_card.setMinimumHeight(250)
+        id_card.setMinimumHeight(280)
         root.addWidget(id_card)
 
         self.log = QPlainTextEdit()
@@ -180,6 +208,7 @@ class AnalyzePage(Page):
         for field in (self.title, self.doi, self.arxiv, self.author):
             field.textChanged.connect(self._refresh_start)
 
+        self._refresh_named_combo()
         self._refresh_start()
 
     def _mode_changed(self, sample_on: bool) -> None:
@@ -201,6 +230,10 @@ class AnalyzePage(Page):
         self.start.setEnabled(has_id and full_ok and idle)
         self.pause.setEnabled(running)
         self.resume.setEnabled(has_id and full_ok and paused and self._last_payload is not None)
+        self.save_named.setEnabled(has_id and idle)
+
+    def on_show(self) -> None:
+        self._refresh_named_combo(select=self._preset)
 
     def _payload(self) -> dict:
         year_raw = self.year.text().strip()
@@ -229,6 +262,7 @@ class AnalyzePage(Page):
         self._pdf = pdf
         if not keep_preset:
             self._preset = None
+            self._refresh_named_combo(select=None)
         self.drop.set_filename(pdf.name)
         try:
             info = inspect_pdf(pdf)
@@ -250,21 +284,105 @@ class AnalyzePage(Page):
         self.append_log("PDF loaded: " + ("; ".join(str(b) for b in bits) or pdf.name))
         self._refresh_start()
 
-    def _load_qc4hep(self) -> None:
-        q = PRESETS["qc4hep"]
-        self._preset = "qc4hep"
+    def _refresh_named_combo(self, select: str | None = None) -> None:
+        self.named_combo.blockSignals(True)
+        self.named_combo.clear()
+        self.named_combo.addItem("None (slug from identifiers)", None)
+        for name in sorted(load_named_seeds()):
+            self.named_combo.addItem(name, name)
+        idx = 0
+        if select:
+            found = self.named_combo.findData(select)
+            if found >= 0:
+                idx = found
+        self.named_combo.setCurrentIndex(idx)
+        self.named_combo.blockSignals(False)
+
+    def _on_named_seed_chosen(self, _index: int = 0) -> None:
+        name = self.named_combo.currentData()
+        if not name:
+            self._preset = None
+            return
+        self._apply_named_seed(str(name))
+
+    def _form_query(self) -> SeedQuery:
+        year_raw = self.year.text().strip()
+        year = int(year_raw) if year_raw.isdigit() else None
+        return SeedQuery(
+            doi=self.doi.text().strip() or None,
+            arxiv_id=self.arxiv.text().strip() or None,
+            title=self.title.text().strip() or None,
+            author=self.author.text().strip() or None,
+            venue=self.venue.text().strip() or None,
+            year=year,
+            pdf=self._pdf,
+            preset=self._preset,
+        ).normalized()
+
+    def _apply_named_seed(self, name: str) -> None:
+        q = get_named_seed(name)
+        if not q:
+            QMessageBox.warning(self, "Named seed", f"Unknown named seed {name!r}.")
+            self._preset = None
+            self._refresh_named_combo(select=None)
+            return
+        self._preset = name
         self.title.setText(q.title or "")
+        self.doi.setText(q.doi or "")
+        self.arxiv.setText(q.arxiv_id or "")
         self.author.setText(q.author or "")
         self.venue.setText(q.venue or "")
         self.year.setText(str(q.year or ""))
-        self.doi.clear()
-        self.arxiv.clear()
         if q.pdf and q.pdf.is_file():
             self.load_pdf(str(q.pdf), keep_preset=True)
         else:
-            self._pdf = q.pdf if q.pdf and q.pdf.exists() else None
-            self.drop.set_filename(q.pdf.name if q.pdf else "qc4hep (no local PDF)")
-        self.append_log("Loaded preset qc4hep.")
+            self._pdf = q.pdf if q.pdf else None
+            if q.pdf:
+                self.drop.set_filename(f"{q.pdf.name} (missing)")
+                self.append_log(f"Named seed {name}: PDF not found at {q.pdf}")
+            else:
+                self.drop.set_filename(f"{name} (no local PDF)")
+        self.append_log(f"Loaded named seed {name} → {CORPORA_DIR / name}/")
+        self._refresh_start()
+
+    def _save_named_seed(self) -> None:
+        q = self._form_query()
+        if not (q.doi or q.arxiv_id or q.title):
+            QMessageBox.warning(
+                self, "Named seed", "Enter a DOI, arXiv id, or title first."
+            )
+            return
+        suggested = self._preset or ""
+        name, ok = QInputDialog.getText(
+            self,
+            "Named seed",
+            "Short name (this becomes the corpus folder):",
+            QLineEdit.EchoMode.Normal,
+            suggested,
+        )
+        if not ok or not str(name).strip():
+            return
+        try:
+            key = normalize_seed_name(str(name))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Named seed", str(exc))
+            return
+        if key in load_named_seeds():
+            go = QMessageBox.question(
+                self,
+                "Named seed",
+                f"Replace existing named seed {key!r}?",
+            )
+            if go != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            key = save_named_seed(key, q)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Named seed", str(exc))
+            return
+        self._preset = key
+        self._refresh_named_combo(select=key)
+        self.append_log(f"Saved named seed {key} → {CORPORA_DIR / key}/")
         self._refresh_start()
 
     def _start(self) -> None:
@@ -297,17 +415,22 @@ class AnalyzePage(Page):
 
     def apply_summary(self, summary: CorpusSummary | None) -> None:
         if not summary:
-            for kpi in (self.kpi_papers, self.kpi_back, self.kpi_fwd, self.kpi_text):
-                kpi.set_value("—")
+            for kpi in (self.kpi_back, self.kpi_fwd, self.kpi_text, self.kpi_pdfs):
+                kpi.set_value("—", "")
+            self.coverage_lbl.setText("")
             return
-        rel = summary.relation_counts
-        st = summary.status_counts
-        self.kpi_papers.set_value(str(summary.paper_count), summary.run_mode or "papers")
-        self.kpi_back.set_value(str(rel.get("backward_reference", 0)), "references")
-        self.kpi_fwd.set_value(str(rel.get("forward_citation", 0)), "citations")
-        fetched = st.get("fetched", 0)
-        pdfs = getattr(summary, "pdf_count", 0) or 0
-        successful = getattr(summary, "success_count", None)
-        if successful is None:
-            successful = fetched
-        self.kpi_text.set_value(str(successful), f"{pdfs} PDFs")
+        seed, back, fwd, total = hop_counts(summary)
+        self.kpi_back.set_value(str(back), "papers the seed cites")
+        self.kpi_fwd.set_value(str(fwd), "papers that cite the seed")
+        self.kpi_text.set_value(
+            str(summary.success_count),
+            f"of {total} papers in corpus" if total else "extracted text on disk",
+        )
+        pdfs, hop = pdf_over_cited_citing(summary)
+        self.kpi_pdfs.set_value(
+            f"{pdfs} / {hop}" if hop else (str(pdfs) if pdfs else "—"),
+            "files in raw/ of cited + citing",
+        )
+        extra = f"{seed} seed" if seed else ""
+        cap = coverage_caption(summary)
+        self.coverage_lbl.setText(" · ".join(p for p in (extra, cap) if p))

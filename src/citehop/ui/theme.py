@@ -61,6 +61,11 @@ QLabel#section {{
 QLabel#muted, QLabel[muted="true"] {{
     color: {TEXT_DIM};
 }}
+QLabel#kpiTitle {{
+    color: {TEXT_DIM};
+    font-size: 11px;
+    font-weight: 500;
+}}
 QLabel#kpiValue {{
     font-family: {_SERIF};
     font-size: 26px;

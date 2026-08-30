@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -799,6 +800,15 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("hello", text[start:end])
         self.assertIn("world", text[start:end])
 
+    def test_locate_span_rejects_unmatched_prefix(self) -> None:
+        from citehop.claims.locate import locate_span
+
+        head = "A" * 80
+        text = f"intro {head} outro"
+        quote = head + " PLUS A HALLUCINATED CLAIM NOT IN THE STORED TEXT"
+        self.assertIsNone(locate_span(text, quote))
+        self.assertIsNotNone(locate_span(text, head))
+
     def test_paper_source_includes_pdf_path_when_raw_pdf_exists(self) -> None:
         import pymupdf
 
@@ -930,9 +940,16 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("Select a project on the Projects tab to author a schema", schema)
         self.assertIn("No claims yet", review)
         self.assertIn("No claims with agreement=", review)
+        self.assertIn("same model", review)
+        self.assertIn("not a validity check", review)
         self.assertIn("Go to paper", review)
+        self.assertIn("Export JSON", review)
+        self.assertIn("Evidence table", review)
         self.assertIn("No corpora yet", corpus)
+        self.assertIn("Fetch remaining PDFs", corpus)
         self.assertIn("Select a project on the Projects tab", extract)
+        self.assertIn("Extract anyway?", extract)
+        self.assertIn("Open exports", extract)
 
     def test_retryable_backend_message_matches_loading_not_json(self) -> None:
         from citehop.claims.llm import retryable_backend_message
@@ -1145,6 +1162,126 @@ class HardeningTests(unittest.TestCase):
         self.assertEqual(updated["verification_status"], "human_confirmed")
         status = self.api.run_status(pid)
         self.assertGreaterEqual(int(status.get("claims_count") or 0), len(claims))
+
+    def test_start_run_warns_when_fetch_still_open(self) -> None:
+        corpus = self.root / "c-warn"
+        corpus.mkdir()
+        (corpus / "text").mkdir()
+        fid = file_id("p-warn")
+        (corpus / "text" / f"{fid}.txt").write_text(RECIPE_TEXT, encoding="utf-8")
+        manifest = Manifest(corpus / "manifest.db")
+        try:
+            manifest.upsert_paper(
+                {
+                    "canonical_id": "p-warn",
+                    "file_id": fid,
+                    "status": "pending",
+                    "relation_to_seed": "seed",
+                    "title": "Still fetching",
+                    "full_text_available": 0,
+                    "metadata": {},
+                }
+            )
+        finally:
+            manifest.close()
+        proj = self.api.create_project("Warn fetch", corpus, template_id="recipe_claims")
+        status = self.api.start_run(proj["project_id"])
+        self.assertIn("pending fetch or retry", status.get("warning") or "")
+        self.assertGreaterEqual(int((status.get("coverage") or {}).get("fetch_open") or 0), 1)
+        self.api.pause_run(proj["project_id"])
+
+    def test_start_run_has_no_warning_when_all_fetched(self) -> None:
+        corpus = _write_corpus(self.root / "c-nowarn", "p-nowarn", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("No warn", corpus, template_id="recipe_claims")
+        status = self.api.start_run(proj["project_id"])
+        self.assertFalse(status.get("warning"))
+        self.api.pause_run(proj["project_id"])
+
+    def test_resume_requeues_done_when_text_file_newer(self) -> None:
+        from citehop.claims.files import claim_file_path
+
+        corpus = _write_corpus(self.root / "c-stale", "p-stale", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Stale text", corpus, template_id="recipe_claims")
+        status = _run_until_idle(self.api, proj["project_id"])
+        self.assertEqual(status["status"], "completed")
+        before = self.api.list_claims(proj["project_id"])
+        self.assertTrue(before)
+        store = ClaimStore(self.api.projects.db_path(proj["project_id"]))
+        try:
+            store.set_run_status(status["run_id"], "paused")
+        finally:
+            store.close()
+        txt = corpus / "text" / f"{file_id('p-stale')}.txt"
+        later = datetime.now(timezone.utc).timestamp() + 120
+        os.utime(txt, (later, later))
+        resumed = self.api.resume_run(proj["project_id"])
+        self.assertEqual(resumed.get("requeued_stale_text"), 1)
+        self.assertEqual(resumed["papers_pending"], 1)
+        self.assertEqual(resumed["papers_done"], 0)
+        self.assertEqual(self.api.list_claims(proj["project_id"]), [])
+        self.assertFalse(
+            claim_file_path(Path(proj["project_dir"]), before[0]["claim_id"]).is_file()
+        )
+        while resumed["status"] == "running":
+            resumed = self.api.process_available(proj["project_id"], max_papers=1)
+        self.assertEqual(resumed["status"], "completed")
+        self.assertTrue(self.api.list_claims(proj["project_id"]))
+
+    def test_evidence_table_markdown_from_confirmed_export(self) -> None:
+        import json
+        import subprocess
+
+        corpus = _write_corpus(self.root / "c-table", "p-table", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Table", corpus, template_id="recipe_claims")
+        _run_until_idle(self.api, proj["project_id"])
+        claims = self.api.list_claims(proj["project_id"])
+        self.assertTrue(claims)
+        self.api.review_claim(proj["project_id"], claims[0]["claim_id"], "confirm")
+        dest = self.root / "table-export.json"
+        self.api.export_claims(
+            proj["project_id"], dest, verification_status="human_confirmed"
+        )
+        script = Path(__file__).resolve().parents[1] / "scripts" / "evidence_table.py"
+        out = self.root / "evidence.md"
+        proc = subprocess.run(
+            [sys.executable, str(script), "--json", str(dest), "--out", str(out)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        )
+        self.assertTrue(out.is_file(), proc.stderr)
+        body = out.read_text(encoding="utf-8")
+        self.assertIn("| paper | type | fields | quote | verification |", body)
+        self.assertIn("p-table", body)
+        self.assertIn("human_confirmed", body)
+        payload = json.loads(dest.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["claims"]), 1)
+        md_path = self.root / "from-api.md"
+        table = self.api.export_evidence_table(proj["project_id"], md_path)
+        self.assertEqual(table["claim_count"], 1)
+        body = md_path.read_text(encoding="utf-8")
+        self.assertIn("p-table", body)
+        self.assertIn("human_confirmed", body)
+
+    def test_select_backend_rejects_cloud_llm(self) -> None:
+        from citehop.claims.llm import LLMError, select_backend
+
+        previous = os.environ.get("CITEHOP_LLM")
+        try:
+            for value in ("gemini", "google", "openai"):
+                with self.subTest(value=value):
+                    os.environ["CITEHOP_LLM"] = value
+                    with self.assertRaises(LLMError) as ctx:
+                        select_backend()
+                    msg = str(ctx.exception).lower()
+                    self.assertIn("not supported", msg)
+                    self.assertIn("local", msg)
+        finally:
+            if previous is None:
+                os.environ.pop("CITEHOP_LLM", None)
+            else:
+                os.environ["CITEHOP_LLM"] = previous
 
 
 if __name__ == "__main__":

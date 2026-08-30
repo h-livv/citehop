@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from citehop.claims.api import ClaimsAPI, ProjectError, SchemaError
+from citehop.claims.api import ClaimsAPI, ExtractionError, ProjectError, SchemaError
 from citehop.claims.files import claim_file_path
 from citehop.claims.locate import clamp_span
 from citehop.ui.pages import Page
@@ -67,10 +68,16 @@ class ReviewPage(Page):
             box.currentIndexChanged.connect(self._reload_claims)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self._reload_claims)
+        export_json = QPushButton("Export JSON…")
+        export_json.clicked.connect(self._export_json)
+        export_md = QPushButton("Evidence table…")
+        export_md.clicked.connect(self._export_evidence)
         filters.addWidget(self.f_type, 1)
         filters.addWidget(self.f_agree)
         filters.addWidget(self.f_verify)
         filters.addWidget(refresh)
+        filters.addWidget(export_json)
+        filters.addWidget(export_md)
         filt_w = QWidget()
         filt_w.setLayout(filters)
 
@@ -133,7 +140,7 @@ class ReviewPage(Page):
         root.addWidget(
             card(
                 filt_w,
-                muted("Disagreement and single-pass claims are listed first — that is where review pays off."),
+                muted("Disagreement and single-pass claims are listed first — that is where review pays off. match is two samples of the same model, not a validity check."),
                 title="Claims",
             )
         )
@@ -357,6 +364,63 @@ class ReviewPage(Page):
             )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _project_or_warn(self) -> dict[str, Any] | None:
+        if not self._project_id:
+            QMessageBox.information(self, "Review", "Select a project on the Projects tab.")
+            return None
+        try:
+            return self.api.get_project(self._project_id)
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Review", str(exc))
+            return None
+
+    def _export_json(self) -> None:
+        proj = self._project_or_warn()
+        if not proj or not self._project_id:
+            return
+        default = Path(proj["project_dir"]) / "exports" / "claims.json"
+        default.parent.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export claims JSON", str(default), "JSON (*.json)"
+        )
+        if not path:
+            return
+        verify = self.f_verify.currentData()
+        try:
+            result = self.api.export_claims(
+                self._project_id, Path(path), verification_status=verify
+            )
+        except ExtractionError as exc:
+            QMessageBox.warning(self, "Export JSON", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Export JSON",
+            f"Wrote {result['claim_count']} claims to\n{result['path']}",
+        )
+
+    def _export_evidence(self) -> None:
+        proj = self._project_or_warn()
+        if not proj or not self._project_id:
+            return
+        default = Path(proj["project_dir"]) / "exports" / "evidence.md"
+        default.parent.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export evidence table", str(default), "Markdown (*.md)"
+        )
+        if not path:
+            return
+        try:
+            result = self.api.export_evidence_table(self._project_id, Path(path))
+        except (ExtractionError, ProjectError, OSError) as exc:
+            QMessageBox.warning(self, "Evidence table", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Evidence table",
+            f"Wrote {result['claim_count']} human_confirmed rows to\n{result['path']}",
+        )
 
 
 class EditClaimDialog(QDialog):
