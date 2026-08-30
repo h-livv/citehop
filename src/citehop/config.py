@@ -23,7 +23,7 @@ CONFIG_DIR = Path(os.environ.get("CITEHOP_CONFIG_DIR", Path.home() / ".config" /
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 CONTACT_EMAIL = os.environ.get("CITEHOP_CONTACT_EMAIL", "harliv.research@gmail.com")
 USER_AGENT = (
-    f"citehop/0.1 (mailto:{CONTACT_EMAIL}; "
+    f"citehop/1.0 (mailto:{CONTACT_EMAIL}; "
     "local 1-hop citation corpus builder)"
 )
 

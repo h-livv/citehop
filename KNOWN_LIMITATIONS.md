@@ -1,93 +1,85 @@
-# Known limitations (hardening pass, 2026-08-30)
+# Known limitations (v1.0.0, 2026-08-30)
 
-This pass converted unknown risk into a listed, mostly regression-tested set of
-issues (`BUGS.md`). It does **not** mean extraction output is trustworthy on every
-backend, model, schema, or corpus size. If a path is named here, assume it is
-untested and verify it before depending on the claims.
+This is the honest leftover list after the v1.0 close-out. If a path is named
+here, assume it is unverified and check it before depending on the claims.
 
-## What this pass did cover
+## Scale and yield
 
-- Fixture-LLM unit tests for atomic writes, leases, pause/resume, two projects, two
-  workers, schema edit policy, review type checks, short/long text, malformed JSON,
-  backend-down pause.
-- One **real Ollama** model (`hf.co/unsloth/Qwen3-0.6B-GGUF:BF16`, 4096 context) on
-  **three real papers** from the qc4hep sample (not the 863-paper manifest): ~32k and
-  ~22k full text plus one abstract-only PRL. Dual-pass extract + confirm/edit via
-  `ClaimsAPI`.
-- Context-overflow retry (that 0.6B cannot swallow a 60k-char clip).
-
-## Backends and models not tested
-
-- **Gemini** (`CITEHOP_LLM=gemini`) — not run. Transport mapping to
-  `BackendUnavailable` is by analogy with Ollama.
-- **FreeToken** engine (`127.0.0.1:1919`) — not started this pass. Unload/load
-  interplay with Ollama was not re-tested.
-- **Ollama models other than Qwen3-0.6B** — no 1.7B / 4B / 14B / 32B agreement
-  distribution. Larger instruct models may produce more `match` / `partial_match`;
-  that is a hypothesis, not a measurement.
-- **Machina `num_gpu` on a cached tag** — 0.6B has no cache. A probe with
-  `num_gpu=99` returned HTTP 500; see `BUGS.md` deferred item.
-
-## Corpora and scale not tested
-
-- **Full qc4hep 863-paper manifest** — `start_run` would enqueue all of them. Do not
-  treat the 3-paper scratch run as a load test.
+- **Full qc4hep extraction did not complete.** The 863-paper 1-hop neighborhood
+  is listed in the manifest. Open-access fetch at close-out was **415 fetched /
+  448 pending**. Dual-pass extract on that corpus was **not** re-run after the
+  resume/requeue fixes, and **gpt-oss-20b was unloaded from VRAM** on purpose.
+- **23 claims / 203 papers is not yield.** Those 203 rows are 18 `done` + 130
+  `error` + 55 `skipped_no_text`. 122 of the errors were `model is still
+  loading` (false errors; resume now requeues them). Among papers that actually
+  finished, **14/18 produced claims**. See `INVESTIGATION.md`.
+- **Yield at full scale is not independently verified** beyond that 18-paper
+  `done` slice. After you reload a model and Resume, compare agreement and
+  yield to the 8 match / 9 partial_match / 6 single_pass_only / 0 disagreement
+  split on those 23 claims.
 - **Corpora above ~1000 papers** — no lock, memory, or ETA testing.
-- **The 540k-char seed PDF text** (`10.1103_prxquantum.5.037001`) — not sent to
-  Ollama. Fixture tests use a synthetic >60k string. Live truncation quality on a
-  half-megabyte file is unknown.
-- **Papers with neither full text nor abstract** — `skipped_no_text` is unit-tested
-  only insofar as empty text is skipped; a live OA-missing row was not pulled.
 
-## Schemas not tested
+## Models and backends
 
-- Schemas with **>20 claim types** or large enum lists (prompt size vs context).
-- Templates `quantum_computing_review` and `quantitative_claims` **on Ollama**
-  (fixture only). Live run used a one-type `reported_finding` schema.
-- **Breaking field-type migrate** — explicitly refused, not implemented.
-- **Schema versioning / keeping old claims bound to an old schema file** — not
-  implemented; claims store `claim_type` strings only.
+- **Gemini** (`CITEHOP_LLM=gemini`) — never given a live extraction run.
+- **Ollama models other than the hardening-pass Qwen3-0.6B** — no agreement
+  distribution. The 74% match+partial figure is **FreeToken gpt-oss-20b** + the
+  3-type `quantum_computing_review` schema on 18 completed papers, not 0.6B.
+- **Reloading gpt-oss-20b** (or any large instruct model) is a tens-of-hours
+  job on the remaining ~700 pending papers. Citehop will not start that unless
+  you load the model and press Resume.
+- **Machina `num_gpu` on a cached Ollama tag** — still coupled for Ollama;
+  FreeToken ignores it. See `BUGS.md`.
 
-## UI / process not tested
+## Text, clip, and skips
 
-- **Qt click-through** of Extract / Review (confirm, filters, provenance highlight).
-  Empty-state copy is asserted as source text. Offsets out of range are unit-tested
-  via `clamp_span`, not a running `QTextEdit`.
-- **Desktop file / `citehop ui` against this pass’s code** — not launched.
-- **Live CLI and UI on one project at once** — two API workers were raced in a test;
-  a human did not run `citehop extract start` with the Extract page open.
-- **`kill -9` during a SQLite page write** — WAL + a single transaction is the
-  design; we did not SIGKILL a process mid-`COMMIT`.
-- **ExtractWorker QThread interruption mid-`llm.complete`** — pause aborts the
-  in-flight HTTP generation, requeues the paper as `pending`, and resume retries
-  it. Fixture + hanging-HTTP tests cover this; live FreeToken/Ollama abort during
-  prefill is the same socket close.
-- **Time-budget pause** — code path exists; not exercised this pass.
+- Prompt clip is still **60 000 characters**, halved on context overflow.
+  Offsets resolve against full stored text. Every claim in the 23-claim slice
+  had `source_start` ≤ 1370; clip bias on results/discussion is **possible**
+  but was not the cause of the 23-claim cap. Watch long papers with 0 claims
+  (Dalmonte/Montangero `10.1080/00107514.2016.1151199` is the named candidate).
+- **`[abstract_only]` is stripped before the LLM** as of this close-out. It was
+  **not** stripped during the 23-claim run. None of those 23 quotes contain the
+  header; abstract-only yield on a later run may still differ.
+- Resume requeues `skipped_no_text` when a text file (or abstract) has since
+  appeared. 52 of 55 skips still had no file at audit time.
 
-## Alignment heuristic (do not over-generalize)
+## Alignment
 
-On 0.6B + one claim type + three papers, **83% of grounded claims were
-`single_pass_only`**, **0% `match`**. That is the opposite of fixture tests. Until
-someone repeats the measurement on a larger instruct model and a richer schema,
-treat agreement flags from live runs as **review-queue hints**, not as a validated
-precision/recall story.
+- `_pair()` can emit `disagreement`. The 0-disagreement count on 23 claims is a
+  real empty bucket (notes populated on partial and single-pass). Do not treat
+  that as a merge-logic bug. `partial_match` is mixed: hyphen noise and real
+  field disagreements both occur. Keep it in the review queue.
+- Verbatim `quoted_source_span` locate still drops paraphrases. That is
+  intentional provenance, not a missed feature.
 
-Grounding (`quoted_source_span` must `locate_span` in stored text) dropped all
-claims from the IOP full-text paper even though the run marked it `done`. Verbatim
-locate will systematically drop paraphrases. Relaxing that would weaken the
-provenance invariant; it was not done here.
+## Export and handoff
 
-## Token / context behavior
+- `citehop export` (no `extract`) is **corpus** JSON/markdown only.
+- `citehop extract export` is the claims handoff (`citehop.claims.v1`). It was
+  validated with the fixture LLM in unit tests, not by feeding a 863-paper
+  dump into an external analysis tool.
 
-- Prompt paper clip starts at 60k **characters**, then halves on
-  `exceed_context_size_error` down to 1500 characters. Offsets are still resolved
-  against **full stored text**. Claims can only quote the prefix the model saw.
-- We do not read the model’s `n_ctx` before the first request.
-- Token budget pause was not hit (budget 2M on a 19k-token run).
+## UI / process
 
-## Project / data layout
+- Qt click-through of every Review control is not a v1.0 gate. Go-to-paper
+  (PDF highlight or text) exists; fixture tests cover empty-state copy.
+- `kill -9` mid-SQLite `COMMIT` was not performed.
+- Time-budget pause exists; not exercised on the gpt-oss-20b run.
+- Do not start a second `CorpusBuilder` on a manifest that is already fetching
+  in the UI (WAL).
 
-- Hardening projects were **not** written into `~/Library/Metadata/_projects`.
-- This tree is application code; corpora stay under `~/Library/Metadata/<slug>/`.
-- There was **no git repository** in `/home/h-livv/opt/citehop` at the end of this
-  pass, so the requested “commit test and fix together” could not be executed here.
+## Schema / engine
+
+- No schema versioning: claims store `claim_type` strings only.
+- Breaking field-type migrate is refused, not implemented.
+- Schemas with **>20 claim types** or huge enums are untested (prompt vs
+  context).
+- The engine has **no domain-specific branches**. QC vs transformers vs recipes
+  is schema JSON only.
+
+## Data layout
+
+- Application code: `~/opt/citehop`.
+- Corpora / projects: `/run/media/h-livv/Vault/CiteHop` (exFAT). The Vault path
+  must be mounted.

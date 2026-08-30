@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> None:
         ("status", "Show run progress."),
         ("run", "Start or resume, then process until idle."),
         ("claims", "Print claims as JSON."),
+        ("export", "Write claims + review state as a JSON handoff file."),
     ):
         p = ex.add_parser(name, help=help_text)
         p.add_argument("--project", required=True)
@@ -104,6 +105,17 @@ def main(argv: list[str] | None = None) -> None:
             p.add_argument("--agreement")
             p.add_argument("--verification")
             p.add_argument("--paper")
+        if name == "export":
+            p.add_argument(
+                "--out",
+                type=Path,
+                default=None,
+                help="Destination JSON path (default: <project>/exports/claims-<run_id>.json).",
+            )
+            p.add_argument(
+                "--verification",
+                help="Optional filter, e.g. human_confirmed. Default: every claim in the latest run.",
+            )
 
     args = parser.parse_args(argv)
     if args.cmd in (None, "ui"):
@@ -256,6 +268,14 @@ def _extract_cmd(args: argparse.Namespace) -> int:
             paper_canonical_id=args.paper,
         )
         print(json.dumps(claims, indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "export":
+        result = api.export_claims(
+            pid,
+            dest=args.out,
+            verification_status=args.verification,
+        )
+        print(json.dumps(result, indent=2))
         return 0
     raise SystemExit(f"Unknown extract command {cmd}")
 
