@@ -1,6 +1,6 @@
 # Citehop
 
-Citehop is a **personal research tool**. It was built for my own literature work on this machine. It is **not** a product, not supported, and not meant to ship.
+Citehop is a **personal research tool**. It was built for my own literature work on my machine. It is **not** a product, not supported, and not meant to ship.
 
 Given a seed paper, it builds a **local 1-hop citation corpus** (the seed, the papers it cites, and the papers that cite it), then runs a **local model** against a **schema you define** to pull out structured claims. You review those claims against the source and keep them as JSON.
 
