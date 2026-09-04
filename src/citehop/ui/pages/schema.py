@@ -74,7 +74,7 @@ class SchemaPage(Page):
         root.addWidget(
             card(
                 top_wrap,
-                muted("Claim types and fields are project data. The extractor iterates this JSON; it has no built-in taxonomy."),
+                muted("Claim types and fields are project data. Type descriptions are text the extractor model sees; the engine has no built-in taxonomy."),
                 title="Claim schema",
             )
         )
@@ -100,12 +100,14 @@ class SchemaPage(Page):
         self.type_id = QLineEdit()
         self.display_name = QLineEdit()
         self.description = QPlainTextEdit()
-        self.description.setPlaceholderText("Shown to the model for this type")
+        self.description.setPlaceholderText(
+            "Copied into the extractor prompt for this type — the model sees this text"
+        )
         self.description.setMaximumHeight(120)
         type_form = QFormLayout()
         type_form.addRow("type_id", self.type_id)
         type_form.addRow("Display name", self.display_name)
-        type_form.addRow("Description", self.description)
+        type_form.addRow("Description (extractor model sees this)", self.description)
 
         self.fields = QTableWidget(0, 3)
         self.fields.setHorizontalHeaderLabels(("key", "type", "enum_values"))
@@ -314,7 +316,7 @@ class SchemaPage(Page):
             return
         try:
             saved = self.api.update_schema(self._project_id, self._payload())
-        except (SchemaError, ProjectError) as exc:
+        except (SchemaError, ProjectError, OSError) as exc:
             QMessageBox.warning(self, "Schema invalid", str(exc))
             return
         self._schema = saved
@@ -337,7 +339,7 @@ class SchemaPage(Page):
             return
         try:
             saved = self.api.apply_template(self._project_id, template_id)
-        except (SchemaError, ProjectError) as exc:
+        except (SchemaError, ProjectError, OSError) as exc:
             QMessageBox.warning(self, "Schema", str(exc))
             return
         self._schema = saved

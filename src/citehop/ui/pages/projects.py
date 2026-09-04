@@ -45,11 +45,22 @@ class ProjectsPage(Page):
         self.budget.setSingleStep(10_000)
         self.budget.setValue(500_000)
         self.budget.setGroupSeparatorShown(True)
+        self.time_budget = QSpinBox()
+        self.time_budget.setRange(0, 10_080)
+        self.time_budget.setSingleStep(15)
+        self.time_budget.setValue(60)
+        self.time_budget.setSuffix(" min")
+        self.time_budget.setSpecialValueText("no limit")
+        self.time_budget.setToolTip(
+            "Pause the extraction run after this many minutes. 0 = no limit. "
+            "Each paper also has a per-generation timeout so a stuck model cannot hang forever."
+        )
         form = QFormLayout()
         form.addRow("Name", self.name)
         form.addRow("Corpus", self.corpus)
         form.addRow("Schema template", self.template)
         form.addRow("Token budget", self.budget)
+        form.addRow("Time budget", self.time_budget)
         form_w = QWidget()
         form_w.setLayout(form)
         create = QPushButton("Create project")
@@ -63,7 +74,7 @@ class ProjectsPage(Page):
         root.addWidget(
             card(
                 wrap,
-                muted("A project binds one corpus to one claim schema. Templates are starter JSON you can edit next. The project folder holds schema.json, extraction.db, and one JSON file per extracted claim."),
+                muted("A project binds one corpus to one claim schema. Templates are starter JSON you can edit next. The project folder holds schema.json, extraction.db, and one JSON file per extracted claim. Time budget pauses a long run; a stuck model also hits a per-generation timeout."),
                 title="New project",
             )
         )
@@ -174,11 +185,13 @@ class ProjectsPage(Page):
             QMessageBox.warning(self, "Project", "Select a corpus with papers.")
             return
         try:
+            minutes = int(self.time_budget.value())
             proj = self.api.create_project(
                 name,
                 corpus,
                 template_id=self.template.currentData(),
                 token_budget=int(self.budget.value()),
+                time_budget_seconds=(minutes * 60) if minutes > 0 else None,
             )
         except (ProjectError, SchemaError, OSError) as exc:
             QMessageBox.warning(self, "Project", str(exc))

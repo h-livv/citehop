@@ -48,10 +48,14 @@ before depending on the claims. Commands and UI: [USAGE.md](USAGE.md).
 
 ## Text, clip, skips, and stale extract
 
-- Prompt clip is still **60 000 characters**, halved on context overflow.
-  Offsets resolve against full stored text. Every claim in the 23-claim slice
-  had `source_start` ≤ 1370; clip bias on results/discussion is **possible**
-  but was not the cause of the 23-claim cap. Watch long papers with 0 claims
+- Prompt clip is **60 000 characters per window**, halved on context overflow
+  inside that window. Papers longer than the clip are split into overlapping
+  character windows (overlap 7 500, **at most 6 windows**, about 322 000
+  characters). Text past the cap is not extracted; Review shows `prompt_char_range`
+  for the window that produced the claim. Offsets resolve against full stored text.
+  Every claim in the 23-claim slice had `source_start` ≤ 1370; clip bias on
+  results/discussion is **possible** but was not the cause of the 23-claim cap.
+  Watch long papers with 0 claims
   (Dalmonte/Montangero `10.1080/00107514.2016.1151199` is the named candidate).
 - **`[abstract_only]` is stripped before the LLM** as of the close-out. It was
   **not** stripped during the 23-claim run. None of those 23 quotes contain the
@@ -73,8 +77,9 @@ before depending on the claims. Commands and UI: [USAGE.md](USAGE.md).
   in the PDF text layer). That is highlight UX, not claim grounding.
 - `_pair()` can emit `disagreement`. The 0-disagreement count on 23 claims is a
   real empty bucket (notes populated on partial and single-pass). Do not treat
-  that as a merge-logic bug. `partial_match` is mixed: hyphen noise and real
-  field disagreements both occur. Keep it in the review queue.
+  that as a merge-logic bug. Hyphen and whitespace variants on **strings** no
+  longer create `partial_match`; enum and boolean fights still do. Keep
+  `partial_match` in the review queue.
 - Verbatim `quoted_source_span` locate still drops paraphrases. That is
   intentional provenance, not a missed feature.
 
@@ -100,7 +105,8 @@ before depending on the claims. Commands and UI: [USAGE.md](USAGE.md).
 
 ## Schema / engine
 
-- No schema versioning: claims store `claim_type` strings only.
+- No schema versioning: claims may snapshot `schema_id` additively; they still
+  store `claim_type` strings. Old rows have `schema_id` null.
 - Breaking field-type migrate is refused, not implemented.
 - Schemas with **>20 claim types** or huge enums are untested (prompt vs
   context).

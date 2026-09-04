@@ -113,6 +113,9 @@ class EngineCrossSchemaTests(unittest.TestCase):
             src = self.api.paper_source(claim["project_id"], claim["paper_canonical_id"])
             self.assertEqual(src["text"][start:end], claim["quoted_source_span"])
             self.assertIn(claim["agreement"], ("match", "partial_match", "disagreement", "single_pass_only"))
+            self.assertIn("paper_title", claim)
+            self.assertIn("full_text_used", claim)
+            self.assertIn("prompt_char_range", claim)
 
         # Human review is schema-agnostic.
         first = recipe_claims[0]

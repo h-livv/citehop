@@ -6,6 +6,7 @@ The desktop UI and CLI call only this module — never engine internals.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections import Counter
 from datetime import datetime, timezone
@@ -34,7 +35,9 @@ from .llm import (
 )
 from .projects import ProjectError, ProjectStore, require_schema_for_run
 from .schema import SchemaError, fields_for_type, list_templates, type_ids
-from .store import ClaimStore, VERIFICATION, extract_lease_seconds
+from .store import AGREEMENT, CONFIDENCE, ClaimStore, VERIFICATION, extract_lease_seconds
+
+log = logging.getLogger(__name__)
 
 
 def _parse_iso(raw: str | None) -> datetime | None:
@@ -491,6 +494,7 @@ class ClaimsAPI:
         store = self._store(project_id)
         try:
             if not run_id:
+                self._sync_claim_files(project_id, store)
                 latest = store.latest_run(project_id)
                 run_id = latest["run_id"] if latest else None
             if not run_id:
@@ -560,6 +564,20 @@ class ClaimsAPI:
         finally:
             store.close()
 
+    def paper_index(self, project_id: str) -> dict[str, dict[str, Any]]:
+        """Cheap metadata for Review. Does not load stored full text."""
+        project = self.projects.get_project(project_id)
+        out: dict[str, dict[str, Any]] = {}
+        for paper in corpus_papers(Path(project["corpus_dir"])):
+            out[paper["canonical_id"]] = {
+                "title": paper.get("title") or paper["canonical_id"],
+                "doi": paper.get("doi"),
+                "arxiv_id": paper.get("arxiv_id"),
+                "year": paper.get("year"),
+                "venue": paper.get("venue"),
+            }
+        return out
+
     def paper_source(self, project_id: str, paper_canonical_id: str) -> dict[str, Any]:
         project = self.projects.get_project(project_id)
         corpus_dir = Path(project["corpus_dir"])
@@ -591,7 +609,11 @@ class ClaimsAPI:
         schema = self.get_schema(project_id)
         store = self._store(project_id)
         try:
-            run = store.get_run(run_id) if run_id else store.latest_run(project_id)
+            if run_id:
+                run = store.get_run(run_id)
+            else:
+                self._sync_claim_files(project_id, store)
+                run = store.latest_run(project_id)
             if not run:
                 raise ExtractionError("No extraction run to export")
             rid = run["run_id"]
@@ -687,6 +709,203 @@ class ClaimsAPI:
             "claim_count": len(claims),
             "verification_status": verification_status or None,
         }
+
+    def _sync_claim_files(self, project_id: str, store: ClaimStore) -> None:
+        """Insert citehop.claim.v1 files that are not yet rows in the latest run.
+
+        SQLite wins when claim_id already exists. Malformed files are skipped.
+        """
+        from .files import discover_claim_paths, read_claim_file
+
+        project = self.projects.get_project(project_id)
+        paths = discover_claim_paths(Path(project["project_dir"]))
+        if not paths:
+            return
+        parsed: list[dict[str, Any]] = []
+        skipped = 0
+        for path in paths:
+            data = read_claim_file(path)
+            if data is None:
+                skipped += 1
+                log.warning("Skipping malformed claim file %s", path)
+                continue
+            parsed.append(data)
+        if skipped:
+            log.warning("Skipped %s malformed claim file(s)", skipped)
+        if not parsed:
+            return
+
+        disk_ids = [str(row["claim_id"]) for row in parsed]
+        latest = store.latest_run(project_id)
+        if latest:
+            run_id = str(latest["run_id"])
+            missing = [cid for cid in disk_ids if cid not in store.claim_ids_in_run(run_id)]
+        else:
+            run_id = None
+            missing = disk_ids
+        if not missing:
+            return
+        already = store.existing_claim_ids(missing)
+        to_insert = [cid for cid in missing if cid not in already]
+        if not to_insert:
+            return
+        want = set(to_insert)
+        rows = [row for row in parsed if str(row["claim_id"]) in want]
+        if run_id is None:
+            run_id = self._create_file_import_run(project_id, store, project, rows)
+        papers_holder: list[dict[str, dict[str, Any]] | None] = [None]
+        corpus_dir = Path(project["corpus_dir"])
+        records = [
+            self._imported_claim_record(
+                row,
+                project_id=project_id,
+                run_id=run_id,
+                corpus_dir=corpus_dir,
+                papers_holder=papers_holder,
+            )
+            for row in rows
+        ]
+        store.insert_claims(records)
+
+    def _create_file_import_run(
+        self,
+        project_id: str,
+        store: ClaimStore,
+        project: dict[str, Any],
+        rows: list[dict[str, Any]],
+    ) -> str:
+        papers: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for row in rows:
+            cid = str(row.get("paper_canonical_id") or "").strip()
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            papers.append({"canonical_id": cid, "file_id": file_id(cid)})
+        schema_id = None
+        try:
+            schema_id = self.get_schema(project_id).get("schema_id")
+        except (SchemaError, ProjectError, OSError):
+            pass
+        run_id = store.create_run(
+            project_id,
+            papers,
+            token_budget=int(project.get("token_budget") or 0),
+            time_budget_seconds=project.get("time_budget_seconds"),
+            llm_backend="file-import",
+            llm_model="file-import",
+            schema_id=schema_id,
+        )
+        for paper in papers:
+            store.mark_paper(run_id, paper["canonical_id"], "done")
+        store.set_run_status(run_id, "completed")
+        return run_id
+
+    def _imported_claim_record(
+        self,
+        data: dict[str, Any],
+        *,
+        project_id: str,
+        run_id: str,
+        corpus_dir: Path,
+        papers_holder: list[dict[str, dict[str, Any]] | None],
+    ) -> dict[str, Any]:
+        agreement = data.get("agreement") or "single_pass_only"
+        if agreement not in AGREEMENT:
+            agreement = "single_pass_only"
+        status = data.get("verification_status") or "unverified_by_human"
+        if status not in VERIFICATION:
+            status = "unverified_by_human"
+        confidence = data.get("confidence_self_reported") or "medium"
+        if confidence not in CONFIDENCE:
+            confidence = "medium"
+        fields = data.get("structured_fields")
+        if not isinstance(fields, dict):
+            fields = {}
+        edit = data.get("human_edit")
+        if not isinstance(edit, dict):
+            edit = None
+        pass_a = (
+            bool(data["present_in_pass_a"])
+            if "present_in_pass_a" in data
+            else True
+        )
+        pass_b = (
+            bool(data["present_in_pass_b"])
+            if "present_in_pass_b" in data
+            else agreement != "single_pass_only"
+        )
+        year = data.get("year")
+        if year is not None:
+            try:
+                year = int(year)
+            except (TypeError, ValueError):
+                year = None
+        prompt = data.get("prompt_char_range")
+        if not (isinstance(prompt, (list, tuple)) and len(prompt) >= 2):
+            prompt = None
+        return {
+            "claim_id": str(data["claim_id"]),
+            "project_id": project_id,
+            "run_id": run_id,
+            "paper_canonical_id": str(data.get("paper_canonical_id") or ""),
+            "claim_type": str(data["claim_type"]),
+            "claim_text": str(data["claim_text"]),
+            "structured_fields": fields,
+            "quoted_source_span": str(data["quoted_source_span"]),
+            "source_char_offset": self._import_offset(data, corpus_dir, papers_holder),
+            "confidence_self_reported": confidence,
+            "present_in_pass_a": pass_a,
+            "present_in_pass_b": pass_b,
+            "agreement": agreement,
+            "disagreement_notes": data.get("disagreement_notes"),
+            "verification_status": status,
+            "human_edit": edit,
+            "paper_title": data.get("paper_title"),
+            "doi": data.get("doi"),
+            "arxiv_id": data.get("arxiv_id"),
+            "year": year,
+            "venue": data.get("venue"),
+            "full_text_used": data.get("full_text_used"),
+            "prompt_char_range": prompt,
+            "schema_id": data.get("schema_id"),
+        }
+
+    def _import_offset(
+        self,
+        data: dict[str, Any],
+        corpus_dir: Path,
+        papers_holder: list[dict[str, dict[str, Any]] | None],
+    ) -> list[int]:
+        raw = data.get("source_char_offset")
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            try:
+                return [int(raw[0]), int(raw[1])]
+            except (TypeError, ValueError):
+                pass
+        quote = str(data.get("quoted_source_span") or "")
+        paper_id = str(data.get("paper_canonical_id") or "")
+        if not quote or not paper_id:
+            return [0, 0]
+        if papers_holder[0] is None:
+            try:
+                papers_holder[0] = {
+                    p["canonical_id"]: p for p in corpus_papers(corpus_dir)
+                }
+            except ExtractionError:
+                papers_holder[0] = {}
+        paper = papers_holder[0].get(paper_id)
+        if not paper:
+            return [0, 0]
+        text = load_paper_text(corpus_dir, paper) or ""
+        if not text:
+            return [0, 0]
+        from .locate import locate_span
+
+        found = locate_span(text, quote)
+        if found is None:
+            return [0, 0]
+        return [int(found[0]), int(found[1])]
 
     def _run_identity(self, project_id: str) -> dict[str, str | None]:
         schema = self.get_schema(project_id)

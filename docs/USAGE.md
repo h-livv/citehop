@@ -243,13 +243,15 @@ A project is one corpus + one schema + a token budget.
 
 | Control | What it does |
 | --- | --- |
-| Name, Corpus, Schema template, Token budget | Create form. Budget range 1 000–99 999 999, default 500 000. |
+| Name, Corpus, Schema template, Token budget, Time budget | Create form. Token budget default 500 000. Time budget default 60 min (0 = no limit); pauses the run when exceeded. |
 | **Create project** | Writes `_projects/<id>/` (`project.json`, `schema.json`, `extraction.db`). |
 | Table | Project, corpus, token budget, schema id, id. Select a row to use it on Schema / Extract / Review. |
 | **Refresh** / **Edit schema** / **Open folder** | Reload, jump to Schema, open the project directory. |
 
-Time budget exists on `project.json` (`time_budget_seconds`) and will pause a run
-when exceeded. There is no spinbox for it in the UI.
+Each model generation also has a hard limit (default 600 s wall, 120 s idle with no
+output) so a stalled Ollama/FreeToken stream cannot hang Extract forever. Override with
+`CITEHOP_GENERATE_TIMEOUT_SECONDS` / `CITEHOP_GENERATE_IDLE_SECONDS`. A timed-out paper
+is marked `error`; the run continues.
 
 ### Schema
 
@@ -259,9 +261,9 @@ there is no built-in taxonomy.
 | Control | What it does |
 | --- | --- |
 | Schema id, Domain label | Label is display-only — never used as logic. |
-| Template combo + **Clone template into this project** | Overwrite schema from a starter. |
+| Template combo + **Clone template into this project** | Overwrite schema from a starter. Save/clone errors from the API are shown. |
 | **Save schema** | Persist. Removing/renaming a `type_id` still referenced by claims is refused; changing a field’s JSON type on such a type is refused. Adding types/fields and renaming displays is allowed. |
-| **Add claim type** / **Remove type** | `type_id`, display name, description (shown to the model). Zero-field types are allowed. |
+| **Add claim type** / **Remove type** | `type_id`, display name, description (**extractor model sees this** — it is copied into the prompt). Zero-field types are allowed. |
 | **Add field** / **Remove field** | `key`, type (`string`, `number`, `boolean`, `enum`), `enum_values`. |
 
 Starter templates:
@@ -279,9 +281,10 @@ Starter templates:
 | Header | Selected project and current model. |
 | KPIs | Papers (done/total), tokens, ETA, status. |
 | Coverage line | Cited/citing in corpus; S2 and OpenAlex lists at resolve; fetch still open; corpus papers not in this run; done papers with newer text. |
-| **Start extraction** | Same as `extract start`. If fetch is still open, a dialog asks **Extract anyway?** (Cancel does not start a run). Papers without a PDF use abstracts. |
+| Last paper error | Canonical id + message; marked retryable (`model is still loading`, backend down) vs hard. Resume retries retryable papers. |
+| **Start extraction** | Same as `extract start`. Refused if a worker for this project is already running in this window. If fetch is still open, a dialog asks **Extract anyway?** (Cancel does not start a run). Papers without a PDF use abstracts. |
 | **Pause** | Same as `extract pause`. Log notes that weights stay loaded. |
-| **Resume** | Same as `extract resume`. Log notes how many papers were requeued for newer text. |
+| **Resume** | Same as `extract resume`. Refused if a worker for this project is already running. Log notes how many papers were requeued for newer text. |
 | **Open exports** | Opens the project `exports/` folder (handoff JSON after a completed run). |
 | Progress log | Per-paper status; completed runs log the handoff JSON path. |
 
@@ -292,13 +295,13 @@ finish.
 
 | Control | What it does |
 | --- | --- |
-| Filters | Claim type; agreement (`disagreement`, `single_pass_only`, `partial_match`, `match`); verification (`unverified_by_human`, `human_confirmed`, `human_rejected`, `human_edited`). |
+| Filters | Claim type; agreement (`disagreement`, `single_pass_only`, `partial_match`, `match`); verification; paper; search over claim text / quote. |
 | **Refresh** | Reload latest run. |
 | **Export JSON…** | Save `citehop.claims.v1` (honors the verification filter; All = every claim in the latest run). |
 | **Evidence table…** | Save a markdown table of **human_confirmed** rows (same as `scripts/evidence_table.py`). |
-| Table | Sorted worst-agreement first. Copy: *match is two samples of the same model, not a validity check*. |
+| Table | Paper **title** (not full text). Sorted worst-agreement first. Copy: *match is two samples of the same model, not a validity check*. |
 | Provenance pane | Quoted span in stored text (highlight). Stale offsets get a clamp note. |
-| Claim pane | Text, fields, agreement, verification. |
+| Claim pane | Labeled rows: title, DOI/arXiv links, year, venue, full-text vs abstract, `prompt_char_range`, pass notes, fields. |
 | **Confirm** / **Reject** / **Edit…** | Review flags. Edit keeps the original under `human_edit`. |
 | **Go to paper** | PDF highlight or text viewer at the quote. PDF search may use shorter prefixes of the quote (hyphenation); claim **grounding** still requires the quote to locate in stored text. |
 | **Open JSON** | The per-claim file under `claims/`. |
@@ -392,6 +395,8 @@ extract export --project ID --verification human_confirmed` then this script.
 | `CITEHOP_FREETOKEN_PYTHON` | Python for FreeToken abort helper. |
 | `CITEHOP_FT_ABORT_UID_PATH` | Abort uid file. Else `$XDG_RUNTIME_DIR`. |
 | `CITEHOP_EXTRACT_LEASE_SECONDS` | Abandoned `extracting` rows (crash). Default 600. |
+| `CITEHOP_GENERATE_TIMEOUT_SECONDS` | Wall clock for one model generation. Default 600. |
+| `CITEHOP_GENERATE_IDLE_SECONDS` | Abort if the stream sends no bytes for this long. Default 120 (capped to the wall). |
 | `MACHINA_CONFIG_DIR` | Machina GPU-layer cache. Default `~/.config/machina`. |
 
 ---
@@ -425,10 +430,19 @@ Project `$CITEHOP_PROJECTS_DIR/<id>/`:
 `locate_span` accepts a quote only if it appears in stored text (exact, strip, or
 whitespace-collapsed). An unmatched quote is dropped; there is **no** 80-character
 prefix fallback. Claims already stored from older runs are not rewritten — use
-`audit_grounding.py`.
+`audit_grounding.py`. Dual-pass string compares fold Unicode hyphens and
+whitespace; enum and boolean mismatches still produce `partial_match`.
 
-Prompt clip is 60 000 characters (halved on context overflow). Offsets resolve
-against full stored text.
+Papers longer than 60 000 characters are split into overlapping character windows
+(7 500-character overlap, at most 6 windows ≈ 322 000 characters). Dual-pass runs
+inside each window; nearby same-type hits are merged. Each claim stores
+`prompt_char_range` for the window that produced it. Offsets still resolve against
+full stored text. Short papers are one window, same as before.
+
+Each claim also snapshots `paper_title`, `doi`, `arxiv_id`, `year`, `venue`,
+`full_text_used` (`full_text` / `abstract_only` / `unknown`), and optional
+`schema_id`. Format stays `citehop.claim.v1`. Old `extraction.db` rows load with
+those keys null.
 
 Resume after a PDF replaces an abstract: `done` papers with a newer `text/` file
 are requeued and their claims for that run are deleted.

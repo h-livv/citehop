@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -46,6 +48,7 @@ class ReviewPage(Page):
         self._claims: list[dict[str, Any]] = []
         self._schema: dict[str, Any] | None = None
         self._paper_win: PaperQuoteWindow | None = None
+        self._papers: dict[str, dict[str, Any]] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -58,14 +61,20 @@ class ReviewPage(Page):
         self.f_type = QComboBox()
         self.f_agree = QComboBox()
         self.f_verify = QComboBox()
+        self.f_paper = QComboBox()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search claim text or quote")
+        self.search.setClearButtonEnabled(True)
         self.f_agree.addItem("All agreement", None)
         for val in ("disagreement", "single_pass_only", "partial_match", "match"):
             self.f_agree.addItem(val, val)
         self.f_verify.addItem("All verification", None)
         for val in ("unverified_by_human", "human_confirmed", "human_rejected", "human_edited"):
             self.f_verify.addItem(val, val)
-        for box in (self.f_type, self.f_agree, self.f_verify):
+        self.f_paper.addItem("All papers", None)
+        for box in (self.f_type, self.f_agree, self.f_verify, self.f_paper):
             box.currentIndexChanged.connect(self._reload_claims)
+        self.search.textChanged.connect(self._reload_claims)
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(self._reload_claims)
         export_json = QPushButton("Export JSON…")
@@ -75,6 +84,8 @@ class ReviewPage(Page):
         filters.addWidget(self.f_type, 1)
         filters.addWidget(self.f_agree)
         filters.addWidget(self.f_verify)
+        filters.addWidget(self.f_paper, 1)
+        filters.addWidget(self.search, 2)
         filters.addWidget(refresh)
         filters.addWidget(export_json)
         filters.addWidget(export_md)
@@ -96,7 +107,8 @@ class ReviewPage(Page):
         self.empty_lbl = muted("Select a project on the Projects tab.")
         self.source = QTextEdit()
         self.source.setReadOnly(True)
-        self.detail = QTextEdit()
+        self.detail = QTextBrowser()
+        self.detail.setOpenExternalLinks(True)
         self.detail.setReadOnly(True)
 
         confirm = QPushButton("Confirm")
@@ -157,7 +169,13 @@ class ReviewPage(Page):
             self._reload_all()
 
     def _reload_all(self) -> None:
+        self._papers = {}
         self._fill_types()
+        if self._project_id:
+            try:
+                self._papers = self.api.paper_index(self._project_id)
+            except (ProjectError, ExtractionError, OSError):
+                self._papers = {}
         self._reload_claims()
         if not self._project_id:
             self.project_lbl.setText("Select a project on the Projects tab.")
@@ -198,6 +216,7 @@ class ReviewPage(Page):
             self.open_json.setEnabled(False)
             return
         try:
+            # Claim JSON under claims/ is ingested inside list_claims.
             self._claims = self.api.list_claims(
                 self._project_id,
                 claim_type=self.f_type.currentData(),
@@ -212,19 +231,34 @@ class ReviewPage(Page):
             self.open_json.setEnabled(False)
             return
         self.table.setSortingEnabled(False)
+        self._fill_paper_filter(self._claims)
+        paper = self.f_paper.currentData()
+        needle = (self.search.text() or "").strip().lower()
+        shown: list[dict[str, Any]] = []
         for claim in self._claims:
+            if paper and claim.get("paper_canonical_id") != paper:
+                continue
+            if needle:
+                blob = f"{claim.get('claim_text') or ''} {claim.get('quoted_source_span') or ''}".lower()
+                if needle not in blob:
+                    continue
+            shown.append(claim)
+        self._claims = shown
+        for claim in shown:
             r = self.table.rowCount()
             self.table.insertRow(r)
+            paper_item = QTableWidgetItem(self._paper_title(claim))
+            paper_item.setToolTip(str(claim.get("paper_canonical_id") or ""))
             vals = (
                 claim.get("agreement") or "",
                 claim.get("claim_type") or "",
                 claim.get("claim_text") or "",
                 claim.get("verification_status") or "",
-                claim.get("paper_canonical_id") or "",
-                claim.get("claim_id") or "",
             )
             for c, val in enumerate(vals):
                 self.table.setItem(r, c, QTableWidgetItem(str(val)))
+            self.table.setItem(r, 4, paper_item)
+            self.table.setItem(r, 5, QTableWidgetItem(str(claim.get("claim_id") or "")))
         self.table.setSortingEnabled(False)
         if self.table.rowCount():
             self.empty_lbl.hide()
@@ -235,7 +269,9 @@ class ReviewPage(Page):
             self.go_paper.setEnabled(False)
             self.open_json.setEnabled(False)
             agree = self.f_agree.currentData()
-            if agree:
+            if needle or paper:
+                self.empty_lbl.setText("No claims match the current search or paper filter.")
+            elif agree:
                 self.empty_lbl.setText(
                     f"No claims with agreement={agree!r} in this project."
                 )
@@ -267,36 +303,45 @@ class ReviewPage(Page):
             return
         self.go_paper.setEnabled(True)
         self.open_json.setEnabled(True)
-        lines = [
-            f"type: {claim.get('claim_type')}",
-            f"agreement: {claim.get('agreement')}",
-            f"verification: {claim.get('verification_status')}",
-            f"confidence: {claim.get('confidence_self_reported')}",
-            f"pass A: {claim.get('present_in_pass_a')}  pass B: {claim.get('present_in_pass_b')}",
-            f"offset: {claim.get('source_char_offset')}",
-            f"fields: {claim.get('structured_fields')}",
-        ]
-        if claim.get("disagreement_notes"):
-            lines.append(str(claim["disagreement_notes"]))
-        if claim.get("human_edit"):
-            lines.append(f"human_edit: {claim['human_edit']}")
+        self.detail.setHtml(_claim_detail_html(claim, self._papers))
         try:
             src = self.api.paper_source(claim["project_id"], claim["paper_canonical_id"])
         except (KeyError, ProjectError, OSError) as exc:
             self.source.setPlainText(str(exc))
-            self.detail.setPlainText("\n".join(lines) + "\n\n" + (claim.get("claim_text") or ""))
             return
         text = src.get("text") or ""
         start, end = claim.get("source_char_offset") or [0, 0]
         start, end, oob = clamp_span(text, int(start), int(end))
+        extra = ""
         if oob:
-            lines.append(
-                "Provenance highlight skipped: stored offsets are outside the current paper text."
-            )
-        self.detail.setPlainText("\n".join(lines) + "\n\n" + (claim.get("claim_text") or ""))
-        self.source.setPlainText(text)
+            extra = "\nProvenance highlight skipped: stored offsets are outside the current paper text."
+        self.source.setPlainText(text + extra)
         if text:
             _highlight(self.source, start, end)
+
+    def _paper_title(self, claim: dict[str, Any]) -> str:
+        title = claim.get("paper_title")
+        if title:
+            return str(title)
+        cid = claim.get("paper_canonical_id") or ""
+        meta = self._papers.get(cid) or {}
+        return str(meta.get("title") or cid)
+
+    def _fill_paper_filter(self, claims: list[dict[str, Any]]) -> None:
+        current = self.f_paper.currentData()
+        self.f_paper.blockSignals(True)
+        self.f_paper.clear()
+        self.f_paper.addItem("All papers", None)
+        seen: set[str] = set()
+        for claim in claims:
+            cid = claim.get("paper_canonical_id")
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            self.f_paper.addItem(self._paper_title(claim), cid)
+        idx = self.f_paper.findData(current)
+        self.f_paper.setCurrentIndex(idx if idx >= 0 else 0)
+        self.f_paper.blockSignals(False)
 
     def _review(self, action: str) -> None:
         claim = self._selected_claim()
@@ -529,3 +574,69 @@ def _highlight(view: QTextEdit, start: int, end: int) -> None:
     view.setExtraSelections([sel])
     view.setTextCursor(cursor)
     view.ensureCursorVisible()
+
+
+def _claim_detail_html(claim: dict[str, Any], papers: dict[str, dict[str, Any]]) -> str:
+    cid = claim.get("paper_canonical_id") or ""
+    meta = papers.get(cid) or {}
+    title = claim.get("paper_title") or meta.get("title") or cid
+    doi = claim.get("doi") if claim.get("doi") not in (None, "") else meta.get("doi")
+    arxiv = (
+        claim.get("arxiv_id") if claim.get("arxiv_id") not in (None, "") else meta.get("arxiv_id")
+    )
+    year = claim.get("year") if claim.get("year") not in (None, "") else meta.get("year")
+    venue = claim.get("venue") if claim.get("venue") not in (None, "") else meta.get("venue")
+    rows: list[tuple[str, str]] = [
+        ("Title", html.escape(str(title))),
+        ("Paper id", html.escape(str(cid))),
+        ("DOI", _doi_html(doi)),
+        ("arXiv", _arxiv_html(arxiv)),
+        ("Year", html.escape(str(year) if year not in (None, "") else "—")),
+        ("Venue", html.escape(str(venue) if venue not in (None, "") else "—")),
+        ("Full text vs abstract", html.escape(str(claim.get("full_text_used") or "unknown"))),
+        ("Prompt range", html.escape(str(claim.get("prompt_char_range") or "—"))),
+        ("Quote offset", html.escape(str(claim.get("source_char_offset") or "—"))),
+        ("Type", html.escape(str(claim.get("claim_type") or "—"))),
+        ("Agreement", html.escape(str(claim.get("agreement") or "—"))),
+        ("Verification", html.escape(str(claim.get("verification_status") or "—"))),
+        ("Confidence", html.escape(str(claim.get("confidence_self_reported") or "—"))),
+        (
+            "Pass notes",
+            html.escape(
+                f"A={claim.get('present_in_pass_a')}  B={claim.get('present_in_pass_b')}"
+            ),
+        ),
+    ]
+    fields = claim.get("structured_fields") or {}
+    if isinstance(fields, dict) and fields:
+        for key, val in fields.items():
+            rows.append((str(key), html.escape("" if val is None else str(val))))
+    elif fields:
+        rows.append(("Fields", html.escape(str(fields))))
+    if claim.get("disagreement_notes"):
+        rows.append(("Disagreement", html.escape(str(claim["disagreement_notes"]))))
+    if claim.get("human_edit"):
+        rows.append(("Human edit", html.escape(str(claim["human_edit"]))))
+    rows.append(("Claim", html.escape(claim.get("claim_text") or "")))
+    rows.append(("Quote", html.escape(claim.get("quoted_source_span") or "")))
+    parts = []
+    for label, value in rows:
+        parts.append(f"<p><b>{html.escape(label)}</b><br>{value}</p>")
+    return "".join(parts)
+
+
+def _doi_html(doi: Any) -> str:
+    text = ("" if doi is None else str(doi)).strip()
+    if not text:
+        return "—"
+    href = text if text.startswith("http") else f"https://doi.org/{text.removeprefix('doi:')}"
+    return f'<a href="{html.escape(href, quote=True)}">{html.escape(text)}</a>'
+
+
+def _arxiv_html(arxiv_id: Any) -> str:
+    text = ("" if arxiv_id is None else str(arxiv_id)).strip()
+    if not text:
+        return "—"
+    bare = text.removeprefix("arxiv:").removeprefix("arXiv:")
+    href = text if text.startswith("http") else f"https://arxiv.org/abs/{bare}"
+    return f'<a href="{html.escape(href, quote=True)}">{html.escape(text)}</a>'

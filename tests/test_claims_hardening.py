@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -345,6 +346,63 @@ class HardeningTests(unittest.TestCase):
         self.assertFalse(client.is_alive())
         self.assertTrue(caught)
         self.assertIsInstance(caught[0], GenerationCancelled)
+
+    def test_stalled_generation_hits_idle_timeout(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from citehop.claims.llm import GenerationTimeout, OllamaLLM, clear_generation_abort
+
+        started = threading.Event()
+
+        class Stall(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.end_headers()
+                started.set()
+                time.sleep(8)
+
+            def log_message(self, *_args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Stall)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host = f"http://127.0.0.1:{server.server_address[1]}"
+        llm = OllamaLLM(model="dummy")
+        llm.host = host
+        clear_generation_abort()
+        with patch.dict(
+            os.environ,
+            {
+                "CITEHOP_GENERATE_TIMEOUT_SECONDS": "30",
+                "CITEHOP_GENERATE_IDLE_SECONDS": "1",
+            },
+        ):
+            with self.assertRaises(GenerationTimeout):
+                llm.complete("extract nothing")
+        server.shutdown()
+        server.server_close()
+
+    def test_generate_timeouts_env(self) -> None:
+        from citehop.claims.llm import generate_timeouts
+
+        with patch.dict(
+            os.environ,
+            {
+                "CITEHOP_GENERATE_TIMEOUT_SECONDS": "90",
+                "CITEHOP_GENERATE_IDLE_SECONDS": "45",
+            },
+        ):
+            self.assertEqual(generate_timeouts(), (90.0, 45.0))
+        with patch.dict(
+            os.environ,
+            {
+                "CITEHOP_GENERATE_TIMEOUT_SECONDS": "30",
+                "CITEHOP_GENERATE_IDLE_SECONDS": "120",
+            },
+        ):
+            self.assertEqual(generate_timeouts(), (30.0, 30.0))
 
     def test_abort_sends_freetoken_scheduler_uid(self) -> None:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -950,6 +1008,10 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("Select a project on the Projects tab", extract)
         self.assertIn("Extract anyway?", extract)
         self.assertIn("Open exports", extract)
+        self.assertIn("already running", extract)
+        self.assertIn("Last paper error", extract)
+        self.assertIn("extractor model sees this", schema)
+        self.assertIn("Search claim text or quote", review)
 
     def test_retryable_backend_message_matches_loading_not_json(self) -> None:
         from citehop.claims.llm import retryable_backend_message
@@ -971,7 +1033,7 @@ class HardeningTests(unittest.TestCase):
         self.api.pause_run(proj["project_id"])
 
     def test_abstract_only_header_is_not_fed_to_the_model(self) -> None:
-        from citehop.claims.engine import load_paper_text
+        from citehop.claims.engine import inspect_paper_text, load_paper_text
 
         corpus = self.root / "c-abs"
         text = (
@@ -985,6 +1047,10 @@ class HardeningTests(unittest.TestCase):
         )
         self.assertIsNotNone(loaded)
         self.assertFalse(loaded.startswith("[abstract_only]"))
+        _text, kind = inspect_paper_text(
+            corpus, {"canonical_id": "p-abs", "file_id": file_id("p-abs")}
+        )
+        self.assertEqual(kind, "abstract_only")
         proj = self.api.create_project("Abs header", corpus, template_id="recipe_claims")
         status = _run_until_idle(self.api, proj["project_id"])
         self.assertEqual(status["status"], "completed")
@@ -993,6 +1059,7 @@ class HardeningTests(unittest.TestCase):
         for claim in claims:
             self.assertNotIn("[abstract_only]", claim["quoted_source_span"])
             self.assertNotIn("[abstract_only]", claim["claim_text"])
+            self.assertEqual(claim["full_text_used"], "abstract_only")
 
     def test_loading_503_pauses_and_leaves_paper_pending(self) -> None:
         from citehop.claims.llm import LLMError
@@ -1256,7 +1323,9 @@ class HardeningTests(unittest.TestCase):
         self.assertIn("p-table", body)
         self.assertIn("human_confirmed", body)
         payload = json.loads(dest.read_text(encoding="utf-8"))
-        self.assertEqual(len(payload["claims"]), 1)
+        self.assertEqual(payload["claims"][0]["paper_title"], "Stew")
+        self.assertIn("full_text_used", payload["claims"][0])
+        self.assertIn("prompt_char_range", payload["claims"][0])
         md_path = self.root / "from-api.md"
         table = self.api.export_evidence_table(proj["project_id"], md_path)
         self.assertEqual(table["claim_count"], 1)
@@ -1283,6 +1352,427 @@ class HardeningTests(unittest.TestCase):
             else:
                 os.environ["CITEHOP_LLM"] = previous
 
+    def test_hyphen_and_whitespace_do_not_create_partial_match(self) -> None:
+        from citehop.claims.align import merge_passes
+
+        a = {
+            "claim_type": "t",
+            "claim_text": "x",
+            "structured_fields": {"label": "state-of-the-art"},
+            "quoted_source_span": "state-of-the-art method",
+            "source_char_offset": [10, 33],
+            "confidence_self_reported": "high",
+        }
+        b = {
+            **a,
+            "structured_fields": {"label": "state\u2010of\u2010the\u2010art"},
+            "quoted_source_span": "state\u2013of\u2013the\u2013art  method",
+        }
+        merged = merge_passes([a], [b])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["agreement"], "match")
+
+    def test_enum_and_boolean_fights_stay_partial_match(self) -> None:
+        from citehop.claims.align import merge_passes
+
+        base = {
+            "claim_type": "t",
+            "claim_text": "x",
+            "quoted_source_span": "the same quote",
+            "source_char_offset": [0, 14],
+            "confidence_self_reported": "high",
+        }
+        enum = merge_passes(
+            [{**base, "structured_fields": {"kind": "alpha"}}],
+            [{**base, "structured_fields": {"kind": "beta"}}],
+        )
+        self.assertEqual(enum[0]["agreement"], "partial_match")
+        boolean = merge_passes(
+            [{**base, "structured_fields": {"ok": True}}],
+            [{**base, "structured_fields": {"ok": False}}],
+        )
+        self.assertEqual(boolean[0]["agreement"], "partial_match")
+
+    def test_parse_claims_json_allows_trailing_text(self) -> None:
+        from citehop.claims.llm import LLMError, parse_claims_json
+
+        raw = 'Sure.\n{"claims": [{"claim_type": "t"}]}\nThanks!'
+        self.assertEqual(parse_claims_json(raw), [{"claim_type": "t"}])
+        wrapped = '{"meta": 1} then {"claims": [{"claim_type": "u"}]} trailing'
+        self.assertEqual(parse_claims_json(wrapped), [{"claim_type": "u"}])
+        with self.assertRaises(LLMError):
+            parse_claims_json("not json at all")
+
+    def test_claim_payload_keeps_v1_and_adds_provenance_keys(self) -> None:
+        from citehop.claims.files import claim_payload
+
+        payload = claim_payload(
+            {
+                "claim_id": "c",
+                "project_id": "p",
+                "run_id": "r",
+                "paper_canonical_id": "paper",
+                "claim_type": "t",
+                "claim_text": "text",
+                "structured_fields": {},
+                "quoted_source_span": "q",
+                "source_char_offset": [0, 1],
+                "confidence_self_reported": "high",
+                "present_in_pass_a": True,
+                "present_in_pass_b": True,
+                "agreement": "match",
+                "disagreement_notes": None,
+                "verification_status": "unverified_by_human",
+                "human_edit": None,
+                "paper_title": "Title",
+                "doi": "10.1/x",
+                "arxiv_id": "1234.5678",
+                "year": 2024,
+                "venue": "Venue",
+                "full_text_used": "full_text",
+                "prompt_char_range": [0, 100],
+                "schema_id": "s1",
+            }
+        )
+        self.assertEqual(payload["format"], "citehop.claim.v1")
+        for key in (
+            "paper_title",
+            "doi",
+            "arxiv_id",
+            "year",
+            "venue",
+            "full_text_used",
+            "prompt_char_range",
+            "schema_id",
+        ):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["paper_title"], "Title")
+        self.assertEqual(payload["prompt_char_range"], [0, 100])
+
+    def test_old_extraction_db_gains_provenance_columns(self) -> None:
+        import sqlite3
+
+        db = self.root / "old-extract.db"
+        conn = sqlite3.connect(db)
+        conn.execute(
+            """
+            CREATE TABLE claims (
+                claim_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                paper_canonical_id TEXT NOT NULL,
+                claim_type TEXT NOT NULL,
+                claim_text TEXT NOT NULL,
+                structured_fields_json TEXT NOT NULL,
+                quoted_source_span TEXT NOT NULL,
+                source_start INTEGER NOT NULL,
+                source_end INTEGER NOT NULL,
+                confidence_self_reported TEXT NOT NULL,
+                present_in_pass_a INTEGER NOT NULL,
+                present_in_pass_b INTEGER NOT NULL,
+                agreement TEXT NOT NULL,
+                disagreement_notes TEXT,
+                verification_status TEXT NOT NULL,
+                human_edit_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        now = utcnow()
+        conn.execute(
+            "INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "old1",
+                "p",
+                "r",
+                "paper-1",
+                "t",
+                "text",
+                "{}",
+                "quote",
+                0,
+                5,
+                "medium",
+                1,
+                1,
+                "match",
+                None,
+                "unverified_by_human",
+                None,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        store = ClaimStore(db)
+        try:
+            cols = {row[1] for row in store.conn.execute("PRAGMA table_info(claims)")}
+            for name in (
+                "paper_title",
+                "doi",
+                "arxiv_id",
+                "year",
+                "venue",
+                "full_text_used",
+                "prompt_start",
+                "prompt_end",
+                "schema_id",
+            ):
+                self.assertIn(name, cols)
+            rec = store.get_claim("old1")
+            self.assertIsNotNone(rec)
+            self.assertIsNone(rec["paper_title"])
+            self.assertIsNone(rec["doi"])
+            self.assertIsNone(rec["prompt_char_range"])
+            self.assertIsNone(rec["full_text_used"])
+            self.assertIsNone(rec["schema_id"])
+        finally:
+            store.close()
+
+    def test_paper_windows_short_and_capped(self) -> None:
+        from citehop.claims.engine import MAX_PAPER_CHARS, MAX_WINDOWS, paper_windows
+
+        self.assertEqual(paper_windows(100), [(0, 100)])
+        self.assertEqual(paper_windows(MAX_PAPER_CHARS), [(0, MAX_PAPER_CHARS)])
+        wins = paper_windows(2_000_000)
+        self.assertEqual(len(wins), MAX_WINDOWS)
+        self.assertLess(wins[-1][1], 2_000_000)
+
+    def test_windowed_extract_dedupes_overlap(self) -> None:
+        from citehop.claims.engine import extract_paper
+        from citehop.claims.schema import load_template
+
+        marker = "An ingredient substitution is allowed: use margarine in place of butter."
+        text = ("Pad. " * 24) + marker + " " + ("Tail. " * 80)
+        schema = load_template("recipe_claims")
+        with (
+            patch("citehop.claims.engine.MAX_PAPER_CHARS", 200),
+            patch("citehop.claims.engine.WINDOW_OVERLAP_CHARS", 80),
+            patch("citehop.claims.engine.MAX_WINDOWS", 6),
+        ):
+            claims, _tokens = extract_paper(
+                project_id="p",
+                run_id="r",
+                schema=schema,
+                paper={
+                    "canonical_id": "paper-1",
+                    "title": "Stew",
+                    "doi": "10.1/xyz",
+                    "arxiv_id": None,
+                    "year": 2019,
+                    "venue": "Kitchen",
+                },
+                stored_text=text,
+                llm=GroundedFixtureLLM(),
+                full_text_used="full_text",
+            )
+        subst = [c for c in claims if c["claim_type"] == "ingredient_substitution"]
+        self.assertEqual(len(subst), 1, claims)
+        rec = subst[0]
+        self.assertEqual(rec["paper_title"], "Stew")
+        self.assertEqual(rec["doi"], "10.1/xyz")
+        self.assertEqual(rec["year"], 2019)
+        self.assertEqual(rec["full_text_used"], "full_text")
+        self.assertIsNotNone(rec["prompt_char_range"])
+        start, end = rec["source_char_offset"]
+        self.assertEqual(text[start:end], rec["quoted_source_span"])
+
+    def test_window_cap_notes_when_tail_is_skipped(self) -> None:
+        from citehop.claims.engine import extract_paper
+        from citehop.claims.schema import load_template
+
+        text = RECIPE_TEXT + " " + ("z" * 5000)
+        schema = load_template("recipe_claims")
+        with (
+            patch("citehop.claims.engine.MAX_PAPER_CHARS", 80),
+            patch("citehop.claims.engine.WINDOW_OVERLAP_CHARS", 10),
+            patch("citehop.claims.engine.MAX_WINDOWS", 2),
+        ):
+            claims, _tokens = extract_paper(
+                project_id="p",
+                run_id="r",
+                schema=schema,
+                paper={"canonical_id": "paper-1", "title": "Long"},
+                stored_text=text,
+                llm=GroundedFixtureLLM(),
+                full_text_used="full_text",
+            )
+        self.assertTrue(claims)
+        self.assertTrue(
+            all("windows" in (c.get("disagreement_notes") or "") for c in claims)
+        )
+        self.assertTrue(all((c.get("prompt_char_range") or [0, 0])[1] <= 150 for c in claims))
+
+    def test_run_status_last_paper_error_flags_retryable(self) -> None:
+        db = self.root / "err.db"
+        store = ClaimStore(db)
+        try:
+            run_id = store.create_run(
+                "p",
+                [
+                    {"canonical_id": "a", "file_id": "fa"},
+                    {"canonical_id": "b", "file_id": "fb"},
+                ],
+                token_budget=1000,
+            )
+            store.claim_next_paper(run_id)
+            store.complete_paper(run_id, "a", status="error", error="bad JSON from model")
+            store.claim_next_paper(run_id)
+            store.complete_paper(
+                run_id, "b", status="error", error="model is still loading"
+            )
+            status = store.run_status_dict(run_id)
+            last = status["last_paper_error"]
+            self.assertEqual(last["paper_canonical_id"], "b")
+            self.assertTrue(last["retryable"])
+            self.assertIn("still loading", last["error"])
+        finally:
+            store.close()
+
+    def _external_claim(self, **overrides: object) -> dict:
+        quote = "use margarine in place of butter"
+        rec: dict = {
+            "format": "citehop.claim.v1",
+            "claim_id": "file-import-1",
+            "paper_canonical_id": "p-import",
+            "claim_type": "ingredient_substitution",
+            "claim_text": "Margarine may replace butter.",
+            "quoted_source_span": quote,
+            "structured_fields": {
+                "original": "butter",
+                "replacement": "margarine",
+            },
+        }
+        rec.update(overrides)
+        return rec
+
+    def _drop_claim_json(self, project_dir: Path, rec: dict, name: str | None = None) -> Path:
+        from citehop.claims.files import claim_file_path, claims_dir
+
+        folder = claims_dir(project_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name if name else claim_file_path(project_dir, rec["claim_id"])
+        path.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+        return path
+
+    def test_list_claims_ingests_file_not_in_db_then_confirm_persists(self) -> None:
+        import json
+
+        from citehop.claims.files import claim_file_path
+
+        corpus = _write_corpus(self.root / "c-ingest", "p-import", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Ingest file", corpus, template_id="recipe_claims")
+        pid = proj["project_id"]
+        project_dir = Path(proj["project_dir"])
+        rec = self._external_claim()
+        self._drop_claim_json(project_dir, rec)
+        claims = self.api.list_claims(pid)
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]["claim_id"], "file-import-1")
+        self.assertEqual(claims[0]["verification_status"], "unverified_by_human")
+        store = ClaimStore(self.api.projects.db_path(pid))
+        try:
+            run = store.latest_run(pid)
+            self.assertIsNotNone(run)
+            self.assertEqual(run["llm_backend"], "file-import")
+            self.assertEqual(run["llm_model"], "file-import")
+            self.assertEqual(run["status"], "completed")
+        finally:
+            store.close()
+        confirmed = self.api.review_claim(pid, "file-import-1", "confirm")
+        self.assertEqual(confirmed["verification_status"], "human_confirmed")
+        on_disk = json.loads(
+            claim_file_path(project_dir, "file-import-1").read_text(encoding="utf-8")
+        )
+        self.assertEqual(on_disk["verification_status"], "human_confirmed")
+        self.assertEqual(self.api.get_claim(pid, "file-import-1")["verification_status"], "human_confirmed")
+
+    def test_list_claims_sqlite_wins_over_stale_file(self) -> None:
+        import json
+
+        from citehop.claims.files import claim_file_path
+
+        corpus = _write_corpus(self.root / "c-dbwin", "p-import", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("DB wins", corpus, template_id="recipe_claims")
+        pid = proj["project_id"]
+        project_dir = Path(proj["project_dir"])
+        rec = self._external_claim(claim_id="file-db-wins")
+        path = self._drop_claim_json(project_dir, rec)
+        self.api.list_claims(pid)
+        self.api.review_claim(pid, "file-db-wins", "reject")
+        stale = json.loads(path.read_text(encoding="utf-8"))
+        stale["verification_status"] = "unverified_by_human"
+        path.write_text(json.dumps(stale, indent=2) + "\n", encoding="utf-8")
+        listed = self.api.list_claims(pid)
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["verification_status"], "human_rejected")
+        disk = json.loads(
+            claim_file_path(project_dir, "file-db-wins").read_text(encoding="utf-8")
+        )
+        self.assertEqual(disk["verification_status"], "unverified_by_human")
+
+    def test_list_claims_globs_file_missing_from_stale_index(self) -> None:
+        import json
+
+        from citehop.claims.files import claims_dir
+
+        corpus = _write_corpus(self.root / "c-staleidx", "p-import", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Stale index", corpus, template_id="recipe_claims")
+        pid = proj["project_id"]
+        rec = self._external_claim(claim_id="file-stale-index")
+        folder = claims_dir(Path(proj["project_dir"]))
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "dropped.json").write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+        (folder / "index.json").write_text(
+            json.dumps(
+                {
+                    "format": "citehop.claims.index.v1",
+                    "claims": [],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        claims = self.api.list_claims(pid)
+        self.assertEqual([c["claim_id"] for c in claims], ["file-stale-index"])
+
+    def test_list_claims_skips_garbage_json_and_lists_valid(self) -> None:
+        from citehop.claims.files import claims_dir
+
+        corpus = _write_corpus(self.root / "c-garbage", "p-import", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Garbage file", corpus, template_id="recipe_claims")
+        pid = proj["project_id"]
+        rec = self._external_claim(claim_id="file-valid-neighbor")
+        folder = claims_dir(Path(proj["project_dir"]))
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "nope.json").write_text("{not json", encoding="utf-8")
+        self._drop_claim_json(Path(proj["project_dir"]), rec)
+        claims = self.api.list_claims(pid)
+        self.assertEqual([c["claim_id"] for c in claims], ["file-valid-neighbor"])
+
+    def test_export_after_confirm_includes_imported_claim(self) -> None:
+        import json
+
+        corpus = _write_corpus(self.root / "c-imp-export", "p-import", "Stew", RECIPE_TEXT)
+        proj = self.api.create_project("Import export", corpus, template_id="recipe_claims")
+        pid = proj["project_id"]
+        rec = self._external_claim(claim_id="file-export-1")
+        self._drop_claim_json(Path(proj["project_dir"]), rec)
+        self.api.list_claims(pid)
+        self.api.review_claim(pid, "file-export-1", "confirm")
+        dest = self.root / "imported-handoff.json"
+        result = self.api.export_claims(pid, dest)
+        payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(payload["format"], "citehop.claims.v1")
+        self.assertIn("CiteHop's job ends at this file", payload["handoff"])
+        by_id = {c["claim_id"]: c for c in payload["claims"]}
+        self.assertIn("file-export-1", by_id)
+        self.assertEqual(by_id["file-export-1"]["verification_status"], "human_confirmed")
+
 
 if __name__ == "__main__":
     unittest.main()
+

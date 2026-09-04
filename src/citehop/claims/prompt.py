@@ -21,10 +21,11 @@ INSTRUCTION = """You extract structured claims from the paper text.
 
 Rules:
 - Use ONLY the claim types listed in SCHEMA_JSON. Do not invent types or fields.
-- Every claim MUST include quoted_source_span: a verbatim substring copied from PAPER_TEXT.
-- Do not use outside knowledge. If the paper does not support a claim, omit it.
-- structured_fields keys must match the schema entry for that claim_type.
+- structured_fields keys must be exactly the keys listed for that claim_type.
+- Every claim MUST include quoted_source_span: copy a substring of PAPER_TEXT character-for-character. Do not paraphrase the quote, fix hyphenation, or add ellipses.
+- Do not use outside knowledge. If PAPER_TEXT does not support a claim, omit it.
 - confidence_self_reported must be one of: high, medium, low.
+- Return one JSON object and nothing else (no markdown, no commentary).
 
 Return a single JSON object:
 {"claims": [

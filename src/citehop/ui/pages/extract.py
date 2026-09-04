@@ -78,6 +78,7 @@ class ExtractPage(Page):
         for i, w in enumerate((self.kpi_papers, self.kpi_tokens, self.kpi_eta, self.kpi_status)):
             kpis.addWidget(w, 0, i)
         self.coverage_lbl = muted("")
+        self.last_error_lbl = muted("")
 
         self.start_btn = QPushButton("Start extraction")
         self.start_btn.setObjectName("accent")
@@ -105,6 +106,7 @@ class ExtractPage(Page):
         root.addWidget(self.model_lbl)
         root.addLayout(kpis)
         root.addWidget(self.coverage_lbl)
+        root.addWidget(self.last_error_lbl)
         root.addWidget(
             card(
                 btn_w,
@@ -210,15 +212,34 @@ class ExtractPage(Page):
         self.resume_btn.setEnabled(
             bool(self._project_id) and not running and st in ("paused", "running")
         )
+        last = status.get("last_paper_error")
+        if isinstance(last, dict) and last.get("error"):
+            cid = last.get("paper_canonical_id") or ""
+            msg = last.get("error") or ""
+            if last.get("retryable"):
+                kind = "retryable — Resume will try this paper again"
+            else:
+                kind = "hard error — this paper stays failed until you start a new run"
+            self.last_error_lbl.setText(f"Last paper error ({cid}): {msg}  [{kind}]")
+        else:
+            self.last_error_lbl.setText("")
         err = status.get("error")
         if err:
             last = self.log.toPlainText().splitlines()
             if not last or last[-1] != err:
                 self.log.appendPlainText(err)
 
+    def _worker_running(self) -> bool:
+        return bool(self._worker and self._worker.isRunning())
+
     def _start(self) -> None:
         if not self._project_id:
             QMessageBox.information(self, "Extract", "Select a project first.")
+            return
+        if self._worker_running():
+            QMessageBox.information(
+                self, "Extract", "Extraction is already running for this project."
+            )
             return
         try:
             proj = self.api.get_project(self._project_id)
@@ -266,6 +287,11 @@ class ExtractPage(Page):
 
     def _resume(self) -> None:
         if not self._project_id:
+            return
+        if self._worker_running():
+            QMessageBox.information(
+                self, "Extract", "Extraction is already running for this project."
+            )
             return
         try:
             status = self.api.resume_run(self._project_id)

@@ -11,6 +11,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,6 +30,10 @@ from citehop.claims.prompt import (
 )
 
 CONFIDENCE = ("high", "medium", "low")
+
+# Wall clock for one model.complete() call; idle = no stream bytes for this long.
+DEFAULT_GENERATE_TIMEOUT_SECONDS = 600.0
+DEFAULT_GENERATE_IDLE_SECONDS = 120.0
 
 
 class LLMError(RuntimeError):
@@ -60,8 +65,50 @@ class ContextTooLong(LLMError):
     """Prompt exceeded the model's context window. Caller may retry with a shorter paper clip."""
 
 
+class GenerationTimeout(LLMError):
+    """One generation hit the wall-clock or idle limit. Mark the paper error; keep the run going."""
+
+
 class GenerationCancelled(Exception):
     """Pause aborted an in-flight generation. The paper stays pending; nothing is written."""
+
+
+def generate_timeouts() -> tuple[float, float]:
+    """Return (wall_seconds, idle_seconds) for one streaming generation."""
+
+    def _env(name: str, default: float) -> float:
+        raw = (os.environ.get(name) or "").strip()
+        if not raw:
+            return default
+        try:
+            return max(1.0, float(raw))
+        except ValueError:
+            return default
+
+    wall = _env("CITEHOP_GENERATE_TIMEOUT_SECONDS", DEFAULT_GENERATE_TIMEOUT_SECONDS)
+    idle = _env("CITEHOP_GENERATE_IDLE_SECONDS", DEFAULT_GENERATE_IDLE_SECONDS)
+    idle = min(idle, wall)
+    return wall, idle
+
+
+def _raise_if_generate_timed_out(
+    *,
+    started: float,
+    last_byte: float,
+    wall: float,
+    idle: float,
+) -> None:
+    now = time.monotonic()
+    if now - started >= wall:
+        raise GenerationTimeout(
+            f"Generation exceeded the {int(wall)}s time limit. "
+            "Paper marked error; resume to continue with the next paper."
+        )
+    if now - last_byte >= idle:
+        raise GenerationTimeout(
+            f"Generation stalled ({int(idle)}s with no model output). "
+            "Paper marked error; resume to continue with the next paper."
+        )
 
 
 class _GenerationGate:
@@ -382,7 +429,17 @@ def _cancellable_request(
         yield resp
     except GenerationCancelled:
         raise
+    except GenerationTimeout:
+        # Stop the backend socket without treating this as a user pause.
+        try:
+            _GATE.abort()
+        except Exception:
+            pass
+        _GATE.clear()
+        raise
     except Exception as exc:
+        if isinstance(exc, GenerationTimeout):
+            raise
         if _GATE.aborted() or (should_stop is not None and should_stop()):
             raise GenerationCancelled("Extraction paused") from exc
         raise
@@ -406,9 +463,15 @@ def _iter_lines_cancellable(
 ) -> Iterator[str]:
     raw = resp.raw
     buf = ""
+    wall, idle = generate_timeouts()
+    started = time.monotonic()
+    last_byte = started
     try:
         while True:
             check_cancelled(should_stop)
+            _raise_if_generate_timed_out(
+                started=started, last_byte=last_byte, wall=wall, idle=idle
+            )
             socks = _walk_sockets(resp)
             if socks:
                 ready, _, _ = select.select(socks, [], [], 0.05)
@@ -424,6 +487,7 @@ def _iter_lines_cancellable(
             if not chunk:
                 check_cancelled(should_stop)
                 break
+            last_byte = time.monotonic()
             if isinstance(chunk, bytes):
                 chunk = chunk.decode("utf-8", "replace")
             buf += chunk
@@ -436,6 +500,8 @@ def _iter_lines_cancellable(
         if buf.strip():
             yield buf.rstrip("\r")
     except GenerationCancelled:
+        raise
+    except GenerationTimeout:
         raise
     except Exception as exc:
         if _GATE.aborted() or (should_stop is not None and should_stop()):
@@ -720,11 +786,12 @@ class OllamaLLM:
         if self.num_gpu is not None:
             payload["options"] = {"num_gpu": int(self.num_gpu)}
         try:
+            wall, _idle = generate_timeouts()
             with _cancellable_request(
                 "POST",
                 f"{self.host}/api/chat",
                 should_stop=should_stop,
-                timeout=(10, 600),
+                timeout=(10, wall),
                 json=payload,
                 stream=True,
             ) as r:
@@ -739,6 +806,8 @@ class OllamaLLM:
         except GenerationCancelled:
             raise
         except BackendUnavailable:
+            raise
+        except GenerationTimeout:
             raise
         except LLMError:
             raise
@@ -768,11 +837,12 @@ class FreeTokenLLM:
             "temperature": 0,
         }
         try:
+            wall, _idle = generate_timeouts()
             with _cancellable_request(
                 "POST",
                 f"{self.host}/v1/chat/completions",
                 should_stop=should_stop,
-                timeout=(10, 600),
+                timeout=(10, wall),
                 json=body,
                 stream=True,
             ) as r:
@@ -828,25 +898,34 @@ def parse_claims_json(raw: str) -> list[dict[str, Any]]:
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
+        text = re.sub(r"\s*```.*$", "", text, flags=re.S)
     try:
-        data = json.loads(text)
+        return _claims_from_parsed(json.loads(text))
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.S)
-        if not match:
-            raise LLMError("Model output was not JSON") from None
+        pass
+    except LLMError:
+        pass
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
         try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise LLMError(f"Model output was not JSON: {exc}") from exc
+            obj, _end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("claims"), list):
+            return obj["claims"]
+    raise LLMError("Model output was not JSON")
+
+
+def _claims_from_parsed(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
-        claims = data
-    elif isinstance(data, dict):
+        return data
+    if isinstance(data, dict):
         claims = data.get("claims")
         if claims is None:
             raise LLMError("JSON object has no 'claims' array")
-    else:
-        raise LLMError("JSON root must be an object or array")
-    if not isinstance(claims, list):
-        raise LLMError("'claims' must be a list")
-    return claims
+        if not isinstance(claims, list):
+            raise LLMError("'claims' must be a list")
+        return claims
+    raise LLMError("JSON root must be an object or array")

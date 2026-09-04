@@ -99,7 +99,16 @@ class ClaimStore:
                 verification_status TEXT NOT NULL,
                 human_edit_json TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                paper_title TEXT,
+                doi TEXT,
+                arxiv_id TEXT,
+                year INTEGER,
+                venue TEXT,
+                full_text_used TEXT,
+                prompt_start INTEGER,
+                prompt_end INTEGER,
+                schema_id TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_claims_project ON claims(project_id, run_id);
@@ -111,12 +120,29 @@ class ClaimStore:
             """
         )
         self._migrate_run_identity()
+        self._migrate_claims_provenance()
 
     def _migrate_run_identity(self) -> None:
         cols = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
         for name in ("llm_backend", "llm_model", "schema_id"):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT")
+
+    def _migrate_claims_provenance(self) -> None:
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(claims)")}
+        for name, decl in (
+            ("paper_title", "TEXT"),
+            ("doi", "TEXT"),
+            ("arxiv_id", "TEXT"),
+            ("year", "INTEGER"),
+            ("venue", "TEXT"),
+            ("full_text_used", "TEXT"),
+            ("prompt_start", "INTEGER"),
+            ("prompt_end", "INTEGER"),
+            ("schema_id", "TEXT"),
+        ):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE claims ADD COLUMN {name} {decl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -523,13 +549,23 @@ class ClaimStore:
         now = utcnow()
         for rec in records:
             offset = rec["source_char_offset"]
+            prompt = rec.get("prompt_char_range")
+            prompt_start = prompt_end = None
+            if isinstance(prompt, (list, tuple)) and len(prompt) >= 2:
+                if prompt[0] is not None and prompt[1] is not None:
+                    prompt_start, prompt_end = int(prompt[0]), int(prompt[1])
+            year = rec.get("year")
+            if year is not None:
+                year = int(year)
             self.conn.execute(
                 "INSERT INTO claims("
                 "claim_id, project_id, run_id, paper_canonical_id, claim_type, claim_text, "
                 "structured_fields_json, quoted_source_span, source_start, source_end, "
                 "confidence_self_reported, present_in_pass_a, present_in_pass_b, agreement, "
-                "disagreement_notes, verification_status, human_edit_json, created_at, updated_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "disagreement_notes, verification_status, human_edit_json, created_at, updated_at, "
+                "paper_title, doi, arxiv_id, year, venue, full_text_used, prompt_start, prompt_end, "
+                "schema_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     rec["claim_id"],
                     rec["project_id"],
@@ -552,12 +588,43 @@ class ClaimStore:
                     else None,
                     now,
                     now,
+                    rec.get("paper_title"),
+                    rec.get("doi"),
+                    rec.get("arxiv_id"),
+                    year,
+                    rec.get("venue"),
+                    rec.get("full_text_used"),
+                    prompt_start,
+                    prompt_end,
+                    rec.get("schema_id"),
                 ),
             )
 
     def get_claim(self, claim_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM claims WHERE claim_id=?", (claim_id,)).fetchone()
         return row_to_claim(row) if row else None
+
+    def claim_ids_in_run(self, run_id: str) -> set[str]:
+        rows = self.conn.execute(
+            "SELECT claim_id FROM claims WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        return {r["claim_id"] for r in rows}
+
+    def existing_claim_ids(self, claim_ids: list[str]) -> set[str]:
+        ids = [cid for cid in claim_ids if cid]
+        if not ids:
+            return set()
+        found: set[str] = set()
+        for i in range(0, len(ids), 400):
+            chunk = ids[i : i + 400]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT claim_id FROM claims WHERE claim_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            found.update(r["claim_id"] for r in rows)
+        return found
 
     def referenced_type_ids(self, project_id: str) -> set[str]:
         rows = self.conn.execute(
@@ -696,12 +763,49 @@ class ClaimStore:
             "claims_count": self.conn.execute(
                 "SELECT COUNT(*) AS n FROM claims WHERE run_id=?", (run_id,)
             ).fetchone()["n"],
+            "last_paper_error": self._last_paper_error(run_id),
         }
+
+    def _last_paper_error(self, run_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT paper_canonical_id, error, updated_at FROM run_papers "
+            "WHERE run_id=? AND status='error' AND error IS NOT NULL "
+            "ORDER BY updated_at DESC, paper_canonical_id DESC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return None
+        from citehop.claims.llm import retryable_backend_message
+
+        message = row["error"] or ""
+        return {
+            "paper_canonical_id": row["paper_canonical_id"],
+            "error": message,
+            "retryable": retryable_backend_message(message),
+            "updated_at": row["updated_at"],
+        }
+
+
+def _row_val(row: sqlite3.Row, name: str, default: Any = None) -> Any:
+    try:
+        keys = row.keys()
+    except Exception:
+        return default
+    if name not in keys:
+        return default
+    val = row[name]
+    return default if val is None else val
 
 
 def row_to_claim(row: sqlite3.Row) -> dict[str, Any]:
     edit_raw = row["human_edit_json"]
     human_edit = json.loads(edit_raw) if edit_raw else None
+    prompt_start = _row_val(row, "prompt_start")
+    prompt_end = _row_val(row, "prompt_end")
+    if prompt_start is not None and prompt_end is not None:
+        prompt_char_range: list[int] | None = [int(prompt_start), int(prompt_end)]
+    else:
+        prompt_char_range = None
     return {
         "claim_id": row["claim_id"],
         "project_id": row["project_id"],
@@ -719,4 +823,12 @@ def row_to_claim(row: sqlite3.Row) -> dict[str, Any]:
         "disagreement_notes": row["disagreement_notes"],
         "verification_status": row["verification_status"],
         "human_edit": human_edit,
+        "paper_title": _row_val(row, "paper_title"),
+        "doi": _row_val(row, "doi"),
+        "arxiv_id": _row_val(row, "arxiv_id"),
+        "year": _row_val(row, "year"),
+        "venue": _row_val(row, "venue"),
+        "full_text_used": _row_val(row, "full_text_used"),
+        "prompt_char_range": prompt_char_range,
+        "schema_id": _row_val(row, "schema_id"),
     }
